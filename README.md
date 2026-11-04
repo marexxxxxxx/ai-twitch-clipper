@@ -186,8 +186,8 @@ kleineren Batches (`CLIP_BATCH_SIZE = 5`) ebenfalls alle 30 s geholt.
 **Fusion:** `score = Σ wᵢ·sᵢ / Σ wᵢ`. Für Neuinstallationen gilt
 `chat_rate 0.35, emote_burst 0.20, clip_created 0.30, viewers 0.15,
 clip_burst 0.10` und die fünf neuen Signale mit 0.0. Die Summe wird normalisiert.
-Bestehende Installationen behalten ihre gespeicherten Gewichte; beim Rollout
-werden nur die neuen Schlüssel mit 0.0 ergänzt.
+Bestehende Installationen behalten ihre gespeicherten Gewichte; bei der
+Migration werden sie nur um die neuen Schlüssel mit 0.0 ergänzt.
 
 Das **Chat-Profil** (Button „Chat-Profil anwenden“) setzt:
 `chat_rate 0.20, unique_chatters 0.15, emote_burst 0.15, hype_keywords 0.10,
@@ -202,10 +202,19 @@ Stundenlimit `max_clips_per_hour` (Neuinstallation: 6) ist noch nicht erreicht.
 Das Limit zählt die Recordings des Streamers aus der Datenbank und überlebt
 damit Reconnects und Neustarts. Der Cooldown beginnt mit dem Trigger.
 
-> Bestehende Installationen behalten `threshold` und `weights`. Beim ersten
-> Start nach dem Update werden nur die neuen Schlüssel angelegt, mit
-> `required_ticks=2` und `max_clips_per_hour=60`. Der Rollout setzt diese Werte
-> bewusst auf 1 bzw. 6, ohne die Gewichte zurückzusetzen.
+**Migration vs. Rollout:** Beim ersten Start nach dem Update legt
+`seed_defaults()` nur fehlende Schlüssel an. Vorhandene Werte bleiben stehen:
+`threshold` und `weights` werden nicht überschrieben; neu hinzu kommen
+`required_ticks=2` und `max_clips_per_hour=60`. Hat eine alte Datenbank noch
+gar keinen `threshold`-Eintrag, schreibt die Migration den bisherigen
+impliziten Wert 0.60. Diese Migration ist **nicht** der Rollout.
+
+Der **explizite Rollout** setzt für die bestehende Installation einmalig per
+`PUT /api/settings` (oder UI): `threshold=0.40`, `required_ticks=1`,
+`max_clips_per_hour=6`, `shadow_mode=true`,
+`streamer_command_triggers=true` und die **aktuell gespeicherten** fünf
+Gewichte, ergänzt um die fünf neuen Schlüssel mit 0.0. Die Gewichte werden
+dabei nicht auf `DEFAULT_WEIGHTS` zurückgesetzt.
 
 **Fenster:** `[T − Vorlauf, T + Nachlauf]`, Default also 240 s + 60 s = 300 s.
 Es wird gewartet, bis der Rekorder das Fensterende erreicht hat (Timeout 5 min).
@@ -225,7 +234,8 @@ verwendet und die Aufnahme als `truncated` markiert.
   Score entspricht damit weiterhin dem bisherigen Verhalten (mit der aktuellen
   Schwelle und `required_ticks`).
 - Der direkte Trigger durch ein Streamer-/Mod-Kommando ist im Shadow-Modus aus.
-- Neue Signale ≥ 0,7 erscheinen höchstens alle 30 s als `[shadow]`-Zeile im Log.
+- Neue Signale ≥ 0,7 erscheinen je Streamer/Session höchstens alle 30 s als
+  `[shadow]`-Zeile im Log.
 
 Auswertung im Container:
 
@@ -354,11 +364,14 @@ bleiben im bisherigen Verzeichnis.
 | `weights` | siehe oben | Gewichte der zehn Signale |
 | `audio_enabled` | false | reserviert, derzeit ohne Funktion |
 
-Bestehende Installationen behalten ihre Werte. `seed_defaults()` ergänzt beim
-Start nur fehlende Schlüssel und setzt dort rückwärtskompatibel
-`required_ticks=2` sowie `max_clips_per_hour=60`; `threshold` und `weights`
-werden nicht überschrieben. Der Rollout stellt diese Werte anschließend
-bewusst auf 1 bzw. 6.
+Bestehende Installationen behalten ihre vorhandenen Werte. `seed_defaults()`
+ergänzt beim Start nur fehlende Schlüssel und setzt dort rückwärtskompatibel
+`required_ticks=2` sowie `max_clips_per_hour=60`; vorhandene `threshold`- und
+`weights`-Einträge werden nicht überschrieben. Fehlt `threshold` noch komplett,
+schreibt die Migration den bisherigen impliziten Wert 0.60. Der **explizite
+Rollout** setzt anschließend `threshold=0.40`, `required_ticks=1`,
+`max_clips_per_hour=6`, `shadow_mode=true`, `streamer_command_triggers=true`
+und ergänzt die gespeicherten Gewichte um die fünf neuen Schlüssel mit 0.0.
 
 **Pfadprüfung:** Beim Speichern wird der Zielordner angelegt (falls nötig) und
 mit einer Temp-Datei real beschrieben. Schlägt das fehl, bleibt der alte Wert
@@ -605,8 +618,13 @@ Dokumentiert, weil die Spec Abweichungen nur mit Begründung zulässt:
    das ist kein offizieller API-Vertrag (siehe Grenzen).
 10. **Bestehende Installationen** bekommen beim Update rückwärtskompatibel
     `required_ticks=2` und `max_clips_per_hour=60`, damit sich das Trigger-
-    Verhalten nicht unbemerkt ändert. Neuinstallationen starten mit 1 und 6.
-    Der Rollout setzt die bestehende Installation explizit auf 1 und 6.
+    Verhalten nicht unbemerkt ändert. `threshold` und `weights` bleiben bei der
+    Migration erhalten; nur wenn `threshold` noch fehlt, wird der bisherige
+    implizite Wert 0.60 geschrieben. Der **explizite Rollout** setzt danach
+    `threshold=0.40`, `required_ticks=1`, `max_clips_per_hour=6`,
+    `shadow_mode=true`, `streamer_command_triggers=true` und ergänzt die
+    gespeicherten Gewichte um die neuen Schlüssel mit 0.0. Neuinstallationen
+    starten direkt mit 0.40/1/6.
 11. **Rohdaten der neuen Signale** (`signal_sample.detail`) enthalten nur
     Aggregate wie Zähler, Mediane und getroffene Keywords – keine Chat-Texte
     und keine User-Namen.

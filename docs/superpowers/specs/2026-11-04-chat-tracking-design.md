@@ -204,8 +204,8 @@ bleiben unverändert (240/60).
   - `recent_triggers < max_clips_per_hour`.
 - `LiveSession` zählt die Recordings vor jedem Tick und übergibt den Wert an
   `detector.update(...)`; `update()` nutzt `can_trigger`.
-- `Detector` kann `trigger_times` weiterhin für Tests/Snapshot führen, die DB
-  ist aber die maßgebliche Quelle.
+- Die DB ist die maßgebliche Quelle für das Stundenlimit; der Detector führt
+  keinen eigenen Stundenpuffer.
 - `snapshot()` liefert zusätzlich `required_ticks`, `max_clips_per_hour` und
   `triggers_last_hour`.
 
@@ -217,9 +217,10 @@ In `LiveSession.tick()`, nach `detector.update(...)`:
    `streamer_command_triggers` true ist **und** Shadow-Mode aus ist:
 2. `can_trigger(now, buffer_s, recent_triggers)` prüfen.
 3. Wenn erlaubt und nicht bereits durch `decision.trigger` ausgelöst:
-   - `detector.mark_triggered(now)` aufrufen,
    - `trigger("auto", decision, manual=False, reason="Streamer/Mod-Clipping")`
      mit den aktuellen Komponenten aufrufen.
+   - Erst nach erfolgreich angelegtem Recording `detector.mark_triggered(now)`
+     aufrufen, damit ein fehlgeschlagener Trigger keinen Cooldown verbraucht.
 4. Fehler werden wie bei anderen Triggern geloggt, nicht nach außen geworfen.
 
 Damit kann ein Moderator/Streamer auch bei ruhigem Chat sofort einen Clip erzeugen.
@@ -360,8 +361,11 @@ wird auf 0,40 gesetzt. `seed_defaults()` erkennt eine bestehende Installation
 an: `required_ticks=2`, `max_clips_per_hour=60`, `shadow_mode=true`,
 `streamer_command_triggers=true`, Standard-Keywords, `copypasta_min_users=3`,
 `copypasta_window_s=10`. Vorhandene Werte (insbesondere `threshold` und
-`weights`) bleiben unverändert. Das Chat-Profil wird nach dem Deployment
-einmalig explizit per API/UI gesetzt (Abschnitt 11).
+`weights`) bleiben unverändert. Fehlt `threshold` noch komplett in einer alten
+Datenbank, schreibt die Migration den bisherigen impliziten Wert 0,60; das ist
+**nicht** der Rollout. Das Chat-Profil wird nach dem Deployment einmalig
+explizit per API/UI gesetzt, und der Rollout in Abschnitt 11 setzt `threshold`
+explizit auf 0,40.
 
 ## 9. UI-Änderungen
 

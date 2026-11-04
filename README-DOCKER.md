@@ -52,7 +52,7 @@ Aufnahme:
 | `cooldown_s` | 180 | Mindestabstand zwischen Triggern |
 | `pre_roll_s` / `post_roll_s` | 240 / 60 | Vor- und Nachlauf in Sekunden |
 | `shadow_mode` | true | Neue Chat-Signale nur messen, nicht fusionieren |
-| `streamer_command_triggers` | true | Streamer-/Mod-Clip-Kommando löst direkt aus |
+| `streamer_command_triggers` | true | Streamer-/Mod-Clip-Kommando löst direkt aus (nur außerhalb des Shadow-Modus) |
 | `hype_keywords` | Standardliste | Kommagetrennte Hype-/Lacher-Begriffe (max. 500 Zeichen) |
 | `copypasta_min_users` | 3 | Mindestzahl verschiedener User für Copypasta (2–10) |
 | `copypasta_window_s` | 10 | Zeitfenster für Copypasta (5–30 s) |
@@ -61,9 +61,17 @@ Aufnahme:
 | `max_gb_per_streamer` | 50 | Quota je Streamer |
 | `max_concurrent_streams` | 40 | Gleichzeitig aufgenommene Live-Kanäle |
 
-Bestehende Installationen behalten `threshold` und `weights`. Beim Update werden
-nur fehlende Schlüssel ergänzt, mit `required_ticks=2` und
-`max_clips_per_hour=60`; der Rollout setzt sie anschließend bewusst auf 1 bzw. 6.
+**Migration vs. Rollout:** Beim Update ergänzt `seed_defaults()` nur fehlende
+Schlüssel. Vorhandene Werte bleiben erhalten: `threshold` und `weights` werden
+nicht überschrieben; neu hinzu kommen `required_ticks=2` und
+`max_clips_per_hour=60`. Fehlt `threshold` noch komplett, schreibt die Migration
+den bisherigen impliziten Wert 0,60. Das ist **nicht** der Rollout.
+
+Der **explizite Rollout** setzt für die bestehende Installation einmalig
+`threshold=0,40`, `required_ticks=1`, `max_clips_per_hour=6`,
+`shadow_mode=true`, `streamer_command_triggers=true` und die aktuell
+gespeicherten Gewichte, ergänzt um die fünf neuen Schlüssel mit 0,0 – nicht
+`DEFAULT_WEIGHTS`.
 
 ## Chat-Tracking (Paket A)
 
@@ -143,4 +151,4 @@ docker compose logs -f --tail=200
 ```
 
 Der Healthcheck fragt alle 20 s `/api/health` ab. Bei einem Neustart laufen
-laufende Zusammenbauten bis zu 90 s aus (`stop_grace_period`).
+laufende Zusammenbauten bis zu 120 s aus (`stop_grace_period`).
