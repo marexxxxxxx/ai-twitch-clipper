@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import re
 import statistics
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from ..timeutil import utcnow
+from ..timeutil import iso, utcnow
 from ..twitch.chat import ChatMessage
 from ..twitch.types import Clip
+from .keywords import keyword_pattern, parse_keywords
 from .weights import DEFAULT_WEIGHTS, sanitize_weights  # re-export for existing imports
 
 BUCKET_S = 5
@@ -18,6 +20,9 @@ MIN_HISTORY_S = 300
 RECENT_EXCLUDE_S = 60
 CLIP_WINDOW_S = 180
 VIEWER_DELTA_S = 120
+STREAMER_COMMAND_HOLD_S = 30
+
+CLIP_COMMAND_RE = re.compile(r"(?i)(?:^|\s)(?:!clip|clip\s+(?:it|that|das)|clippen|!highlight)(?:\s|$)")
 
 HYPE_EMOTES = (
     "KEKW",
@@ -47,6 +52,17 @@ def burst_score(metric: float, median: float) -> float:
     return clamp((metric - 2.0 * median) / (4.0 * median + 4.0))
 
 
+def identity(message: ChatMessage) -> str:
+    """Stabile Nutzerkennung: Twitch-ID, sonst Anzeigename."""
+    return message.user_id or message.user
+
+
+def _has_streamer_badge(badges: str) -> bool:
+    """True, wenn die Badge-Liste Streamer- oder Moderator-Rechte enthält."""
+    tokens = {badge.strip() for badge in badges.split(",")}
+    return bool(tokens & {"broadcaster/1", "moderator/1"})
+
+
 def viewers_score(delta: float) -> float:
     """Relative Zuschaueränderung; nur positive Werte zählen."""
     return clamp(delta / 0.10)
@@ -65,6 +81,10 @@ class Bucket:
     messages: int = 0
     emote_only: int = 0
     hype: int = 0
+    users: set[str] = field(default_factory=set)
+    hype_keywords: int = 0
+    clip_commands: int = 0
+    hype_matches: set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -83,13 +103,23 @@ class SessionSignals:
     Zeitpunkte werden explizit übergeben (kein verstecktes ``now()``).
     """
 
-    def __init__(self, started_at: datetime | None = None) -> None:
+    def __init__(
+        self,
+        started_at: datetime | None = None,
+        hype_keywords: str | None = None,
+        copypasta_min_users: int = 3,
+        copypasta_window_s: int = 10,
+    ) -> None:
         self.started_at = started_at or utcnow()
         self.buckets: dict[int, Bucket] = defaultdict(Bucket)
         self.viewer_samples: deque[tuple[datetime, int]] = deque(maxlen=400)
         self.recent_clips: dict[str, Clip] = {}
         self.seen_clip_ids: set[str] = set()
         self.last_clip_poll: datetime | None = None
+        self._hype_pattern = keyword_pattern(parse_keywords(hype_keywords))
+        self.copypasta_min_users = int(copypasta_min_users)
+        self.copypasta_window_s = int(copypasta_window_s)
+        self._streamer_command_until: datetime | None = None
 
     # -- Chat ---------------------------------------------------------------
     def on_chat(self, message: ChatMessage, now: datetime | None = None) -> None:
@@ -100,6 +130,15 @@ class SessionSignals:
         if message.emote_only:
             bucket.emote_only += 1
         bucket.hype += max(0, message.hype_count)
+        bucket.users.add(identity(message))
+        matches = self._hype_pattern.findall(message.text)
+        if matches:
+            bucket.hype_keywords += len(matches)
+            bucket.hype_matches.update(match.lower() for match in matches)
+        if CLIP_COMMAND_RE.search(message.text):
+            bucket.clip_commands += 1
+            if _has_streamer_badge(message.badges):
+                self._streamer_command_until = now + timedelta(seconds=STREAMER_COMMAND_HOLD_S)
         cutoff = int((now - timedelta(seconds=HISTORY_S)).timestamp())
         for old_key in [k for k in self.buckets if k < cutoff]:
             self.buckets.pop(old_key, None)
@@ -176,6 +215,18 @@ class SessionSignals:
         )
 
     # -- Bucket-Auswertung --------------------------------------------------
+    @staticmethod
+    def _bucket_value(bucket: Bucket, metric: str) -> float:
+        if metric == "messages":
+            return float(bucket.messages)
+        if metric == "unique_chatters":
+            return float(len(bucket.users))
+        if metric == "hype_keywords":
+            return float(bucket.hype_keywords)
+        if metric == "clip_commands":
+            return float(bucket.clip_commands)
+        return float(bucket.emote_only + bucket.hype)
+
     def _window_values(self, now: datetime, metric: str, upto_offset_s: int = RECENT_EXCLUDE_S) -> list[float]:
         """Werte aller 5-s-Buckets der letzten 15 min, ohne die letzten 60 s.
 
@@ -189,12 +240,7 @@ class SessionSignals:
         end_key = bucket_key(end)
         while current <= end_key:
             bucket = self.buckets.get(current)
-            if bucket is None:
-                values.append(0.0)
-            elif metric == "messages":
-                values.append(float(bucket.messages))
-            else:
-                values.append(float(bucket.emote_only + bucket.hype))
+            values.append(0.0 if bucket is None else self._bucket_value(bucket, metric))
             current += BUCKET_S
         if not values:
             return []
@@ -207,7 +253,50 @@ class SessionSignals:
         bucket = self.buckets.get(key)
         if bucket is None:
             return 0.0
-        return float(bucket.messages if metric == "messages" else bucket.emote_only + bucket.hype)
+        return self._bucket_value(bucket, metric)
+
+    def _burst_signal(self, now: datetime, metric: str, extra_key: str) -> SignalDetail:
+        value = self._bucket_metric(now, metric)
+        if now - self.started_at < timedelta(seconds=MIN_HISTORY_S):
+            return SignalDetail(score=0.0, metric=value, samples=0)
+        values = self._window_values(now, metric)
+        if len(values) < 12:
+            return SignalDetail(score=0.0, metric=value, samples=len(values))
+        median = statistics.median(values)
+        return SignalDetail(
+            score=burst_score(value, median),
+            metric=value,
+            median=median,
+            samples=len(values),
+            extra={extra_key: value, "median": median},
+        )
+
+    def unique_chatters_signal(self, now: datetime | None = None) -> SignalDetail:
+        now = now or utcnow()
+        return self._burst_signal(now, "unique_chatters", "unique_chatters")
+
+    def hype_keywords_signal(self, now: datetime | None = None) -> SignalDetail:
+        now = now or utcnow()
+        detail = self._burst_signal(now, "hype_keywords", "hype_keywords")
+        bucket = self.buckets.get(bucket_key(now) - BUCKET_S)
+        matched = ",".join(sorted(bucket.hype_matches)) if bucket is not None else ""
+        detail.extra["matched"] = matched
+        return detail
+
+    def clip_commands_signal(self, now: datetime | None = None) -> SignalDetail:
+        now = now or utcnow()
+        return self._burst_signal(now, "clip_commands", "clip_commands")
+
+    def streamer_command_signal(self, now: datetime | None = None) -> SignalDetail:
+        now = now or utcnow()
+        if self._streamer_command_until is not None and now >= self._streamer_command_until:
+            self._streamer_command_until = None
+        hit = self._streamer_command_until is not None
+        return SignalDetail(
+            score=1.0 if hit else 0.0,
+            metric=1.0 if hit else 0.0,
+            extra={"hit": 1.0 if hit else 0.0, "until": iso(self._streamer_command_until)},
+        )
 
     def chat_rate_signal(self, now: datetime | None = None) -> SignalDetail:
         now = now or utcnow()

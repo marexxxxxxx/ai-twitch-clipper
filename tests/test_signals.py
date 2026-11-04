@@ -96,6 +96,35 @@ def test_old_clips_are_ignored() -> None:
     assert signals.clip_signal(NOW).score == 0.0
 
 
+def test_unique_chatters_counts_distinct_users():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10))
+    message_ts = NOW - timedelta(seconds=5)
+    signals.on_chat(ChatMessage(ts=message_ts, user="Alice", user_id="1", text="a", emotes=[], emote_only=False, hype_count=0), now=message_ts)
+    signals.on_chat(ChatMessage(ts=message_ts, user="Alice", user_id="1", text="b", emotes=[], emote_only=False, hype_count=0), now=message_ts)
+    signals.on_chat(ChatMessage(ts=message_ts, user="Bob", user_id="2", text="c", emotes=[], emote_only=False, hype_count=0), now=message_ts)
+    assert signals._bucket_metric(NOW, "unique_chatters") == 2
+
+def test_hype_keywords_and_clip_commands_are_counted():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10), hype_keywords="geil,lol")
+    message_ts = NOW - timedelta(seconds=5)
+    signals.on_chat(ChatMessage(ts=message_ts, user="A", user_id="1", text="das war geil", emotes=[], emote_only=False, hype_count=0), now=message_ts)
+    signals.on_chat(ChatMessage(ts=message_ts, user="B", user_id="2", text="!clip", emotes=[], emote_only=False, hype_count=0), now=message_ts)
+    assert signals._bucket_metric(NOW, "hype_keywords") == 1
+    assert signals._bucket_metric(NOW, "clip_commands") == 1
+
+def test_streamer_command_hits_and_expires():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10))
+    message = ChatMessage(ts=NOW, user="Alpha", user_id="1", text="!clip", emotes=[], emote_only=False, hype_count=0, badges="broadcaster/1")
+    signals.on_chat(message, now=NOW)
+    assert signals.streamer_command_signal(NOW).score == 1.0
+    assert signals.streamer_command_signal(NOW + timedelta(seconds=31)).score == 0.0
+
+def test_regular_user_clip_command_is_not_streamer_command():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10))
+    message = ChatMessage(ts=NOW, user="Viewer", user_id="2", text="!clip", emotes=[], emote_only=False, hype_count=0, badges="subscriber/12")
+    signals.on_chat(message, now=NOW)
+    assert signals.streamer_command_signal(NOW).score == 0.0
+
 def test_parse_privmsg_emote_only() -> None:
     line = (
         "@badge-info=;display-name=Tester;emotes=25:0-4/1902:6-10;mod=0 "
