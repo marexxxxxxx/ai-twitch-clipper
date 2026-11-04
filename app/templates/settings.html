@@ -72,6 +72,17 @@
   </section>
 
   <section class="panel">
+    <h2>Kapazität</h2>
+    <div class="form-grid">
+      <label class="field">
+        <span>Max. gleichzeitige Streams</span>
+        <input type="number" name="max_concurrent_streams" value="{{ values.max_concurrent_streams }}" min="1" max="200" step="1" required>
+        <small class="muted">Gleichzeitig laufende Live-Aufnahmen; weitere Live-Kanäle warten in der Warteschlange.</small>
+      </label>
+    </div>
+  </section>
+
+  <section class="panel">
     <h2>Gewichte der Fusion</h2>
     <p class="muted small">Die Summe wird automatisch auf 1 normalisiert. <code>clip_burst</code> wird zusätzlich als Verstärker gewertet.</p>
     <div class="form-grid weights">

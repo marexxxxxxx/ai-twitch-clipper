@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..api.serializers import recording_dict, streamer_dict
+from ..capacity import capacity_snapshot
 from ..dashboard_data import build_dashboard
 from ..db import get_db
 from ..models import LogEntry, Recording, Streamer
@@ -43,11 +44,18 @@ async def dashboard_page(request: Request, db: AsyncSession = Depends(get_db)) -
 async def streamers_page(request: Request, db: AsyncSession = Depends(get_db)) -> HTMLResponse:
     rows = (await db.execute(select(Streamer).order_by(Streamer.login))).scalars().all()
     supervisor = request.app.state.supervisor
-    items = [streamer_dict(row, supervisor.snapshot(row.id)) for row in rows]
+    items = []
+    for row in rows:
+        runtime = supervisor.snapshot(row.id)
+        item = streamer_dict(row, runtime)
+        item["queue_position"] = (runtime or {}).get("queue_position")
+        items.append(item)
+    settings = await request.app.state.settings_service.get()
+    capacity = await capacity_snapshot(supervisor, settings)
     return templates.TemplateResponse(
         request,
         "streamers.html",
-        {"page": "streamers", "streamers": items},
+        {"page": "streamers", "streamers": items, "capacity": capacity},
     )
 
 

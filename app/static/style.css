@@ -359,7 +359,7 @@ h3 { font-size: 1.02rem; }
 .field.grow { flex: 1; min-width: 220px; }
 .field > span { font-size: 0.8rem; font-weight: 600; color: var(--muted); }
 .field small { font-size: 0.75rem; }
-input[type="text"], input[type="number"], input[type="password"], select {
+input[type="text"], input[type="number"], input[type="password"], input[type="search"], select, textarea {
   background: var(--panel-2);
   border: 1px solid var(--border);
   color: var(--text);
@@ -369,7 +369,8 @@ input[type="text"], input[type="number"], input[type="password"], select {
   font-size: 0.9rem;
   width: 100%;
 }
-input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+textarea { min-height: 140px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.45; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 .checkbox { flex-direction: row; align-items: center; gap: 8px; }
 .checkbox input { width: auto; }
 .checkbox > span { color: var(--text); font-weight: 500; }
@@ -456,6 +457,42 @@ input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color:
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { border-left-color: var(--red); }
 .toast.success { border-left-color: var(--green); }
+
+/* Massen-Import und Kapazität */
+.bulk-report { margin-top: 14px; }
+.bulk-issues {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.bulk-issues li { margin: 3px 0; }
+.bulk-issues code { color: var(--text); }
+.table-tools {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.table-tools .field { max-width: 420px; }
+.dot.queued { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
+.status-text.queued { color: var(--amber); }
+.table tr.is-queued td { background: var(--amber-soft); }
+.capacity-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+}
+.capacity-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+.capacity-fact strong { font-size: 1.25rem; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
 
 @media (max-width: 860px) {
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }

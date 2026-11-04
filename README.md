@@ -34,7 +34,7 @@ Danach die Oberfläche öffnen: **http://localhost:8000**
 | Seite | Zweck |
 |---|---|
 | `/` | Dashboard: Live-Status, Zuschauer, Puffer, Score-Sparkline, letzte Aufnahmen |
-| `/streamers` | Streamer hinzufügen, pausieren, löschen |
+| `/streamers` | Streamer einzeln oder per Massen-Import hinzufügen, pausieren, löschen |
 | `/recordings` | Aufnahmen ansehen, herunterladen, Sidecar einsehen, löschen |
 | `/settings` | Speicherort, Schwellen, Vor-/Nachlauf, Cooldown, Qualität, Retention |
 | `/logs` | letzte 500 Logzeilen mit Auto-Refresh |
@@ -90,6 +90,59 @@ HTTP 404. Der Kanal muss zum Anlegen nicht live sein. Die Überwachung startet
 automatisch; ein Offline-Kanal wird alle 30 Sekunden geprüft. Nach dem Erkennen
 eines Live-Streams beginnt die Aufnahme in den Ringpuffer (2-Sekunden-Segmente,
 maximal 360 Sekunden).
+
+### Mehrere Kanäle auf einmal
+
+Unter `/streamers` gibt es dafür das Panel **„Mehrere Kanäle importieren“**.
+Pro Zeile (oder durch Komma/Semikolon getrennt) sind erlaubt:
+
+```text
+https://www.twitch.tv/shroud
+#caedrel
+@forsen
+twitch.tv/example/videos
+```
+
+Bereits vorhandene Kanäle werden übersprungen, unbekannte als „nicht gefunden“
+gemeldet. Maximal 200 Kanäle pro Import. Dasselbe per API:
+
+```bash
+curl -X POST http://localhost:8000/api/streamers/bulk \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"https://twitch.tv/shroud\n#caedrel\nforsen"}'
+
+# Antwort:
+# {"counts":{"added":3,"duplicate":0,"not_found":0,"invalid":0},
+#  "items":[{"input":"https://twitch.tv/shroud","login":"shroud",
+#            "status":"added","detail":"Hinzugefügt."}, ...]}
+```
+
+Ist Twitch nicht erreichbar, antwortet der Endpunkt mit HTTP 502 und legt
+**keinen** der Einträge an.
+
+---
+
+## Maßstab: 40 Streams gleichzeitig
+
+Gemessen mit einem 720p60-Stream (streamlink + ffmpeg, Ringpuffer 360 s):
+
+| Messgröße | ein Stream | 40 Streams (Hochrechnung) |
+|---|---|---|
+| RAM (RSS) | ~108 MB (streamlink ~56 MB + ffmpeg ~52 MB) | ~4,3 GB |
+| Download | ~3 Mbit/s | ~120 Mbit/s |
+| Schreiblast Ringpuffer | ~1,3 MB/s | ~52 MB/s |
+| Ringpuffer (360 s) | ~0,5 GB | ~19 GB |
+
+**Empfehlung für 40 × 720p60:** 4 CPU-Kerne, 8 GB RAM, 200 Mbit/s Netzwerk,
+SSD mit mindestens 100 GB freiem Speicher. Bei 480p halbieren sich Bandbreite
+und Schreiblast.
+
+`max_concurrent_streams` (Standard 40, 1–200) begrenzt, wie viele Live-Kanäle
+tatsächlich gleichzeitig aufnehmen. Weitere Live-Kanäle bleiben in der
+Warteschlange; die Streamer-Seite zeigt sie als `WARTESCHLANGE` mit „Platz n“,
+das Dashboard zeigt aktive Streams, Warteschlange, Prozesse, Speicher und die
+Twitch-Anfragen je Zyklus. Die Einstellung liegt unter `/settings` im Panel
+„Kapazität“.
 
 ---
 

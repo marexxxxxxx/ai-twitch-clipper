@@ -6,6 +6,9 @@
     <h1>Streamer</h1>
     <p class="muted">Kanäle werden dauerhaft gespeichert und fortlaufend überwacht.</p>
   </div>
+  <div class="head-meta">
+    <span class="pill">aktiv {{ capacity.active }} / Limit {{ capacity.max_concurrent }} · {{ capacity.queued }} in Warteschlange</span>
+  </div>
 </section>
 
 <section class="panel">
@@ -21,9 +24,31 @@
 </section>
 
 <section class="panel">
+  <h2>Mehrere Kanäle importieren</h2>
+  <form id="bulk-import-form" autocomplete="off">
+    <label class="field">
+      <span>Kanäle (eine Zeile je Kanal oder durch Komma/Semikolon getrennt)</span>
+      <textarea name="input" rows="8" placeholder="https://twitch.tv/shroud&#10;#caedrel&#10;forsen"></textarea>
+    </label>
+    <div class="form-actions">
+      <button class="btn" type="submit">Importieren</button>
+      <span class="muted small" id="bulk-result"></span>
+    </div>
+  </form>
+  <div id="bulk-report" class="bulk-report" hidden></div>
+  <p class="muted small">Akzeptiert vollständige URLs, <code>#login</code>, <code>@login</code> und reine Logins – maximal 200 Kanäle pro Import. Bereits vorhandene Kanäle werden übersprungen.</p>
+</section>
+
+<section class="panel">
   <div class="panel-head">
     <h2>Überwachte Streamer</h2>
-    <span class="muted small" id="streamer-count">{{ streamers | length }} Einträge</span>
+    <span class="muted small" id="streamer-count">{{ streamers | length }} von {{ streamers | length }}</span>
+  </div>
+  <div class="table-tools">
+    <label class="field grow">
+      <span>Filtern</span>
+      <input type="search" id="streamer-filter" placeholder="Login oder Anzeigename" autocomplete="off">
+    </label>
   </div>
   <div class="table-wrap">
     <table class="table" id="streamer-table">
@@ -35,10 +60,17 @@
       </thead>
       <tbody>
         {% for s in streamers %}
-        <tr data-streamer-id="{{ s.id }}" data-enabled="{{ 'true' if s.enabled else 'false' }}">
+        <tr data-streamer-id="{{ s.id }}" data-enabled="{{ 'true' if s.enabled else 'false' }}"
+            data-login="{{ s.login }}" data-display-name="{{ s.display_name }}"
+            class="{{ 'is-queued' if s.state == 'queued' and s.enabled }}">
           <td>
             <span class="dot {{ s.state if s.enabled else 'offline' }}"></span>
-            <span class="status-text">{{ s.state | upper if s.enabled else 'PAUSIERT' }}</span>
+            <span class="status-text {{ 'queued' if s.state == 'queued' and s.enabled }}">
+              {{- 'WARTESCHLANGE' if s.state == 'queued' and s.enabled else (s.state | upper if s.enabled else 'PAUSIERT') -}}
+            </span>
+            {% if s.state == 'queued' and s.enabled and s.queue_position is not none %}
+            <div class="muted small">Platz {{ s.queue_position + 1 }}</div>
+            {% endif %}
           </td>
           <td><strong>@{{ s.login }}</strong>{% if s.last_error %}<div class="error-text small">{{ s.last_error }}</div>{% endif %}</td>
           <td>{{ s.display_name }}</td>
@@ -52,7 +84,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="8" class="muted">Noch keine Streamer angelegt.</td></tr>
+        <tr class="empty-row"><td colspan="8" class="muted">Noch keine Streamer angelegt.</td></tr>
         {% endfor %}
       </tbody>
     </table>

@@ -37,6 +37,46 @@
 
 <section class="panel">
   <div class="panel-head">
+    <h2>Kapazität</h2>
+    <span class="muted small">Live-Aufnahmen und Systemlast</span>
+  </div>
+  <div class="capacity-grid">
+    <div class="capacity-fact">
+      <span class="stat-label">Kapazität</span>
+      <strong id="stat-capacity">{{ data.capacity.active }} / {{ data.capacity.max_concurrent }}</strong>
+      <span class="muted small">Streams gleichzeitig aktiv</span>
+    </div>
+    <div class="capacity-fact">
+      <span class="stat-label">Warteschlange</span>
+      <strong id="stat-queued">{{ data.capacity.queued }}</strong>
+      <span class="muted small">Live-Kanäle warten</span>
+    </div>
+    <div class="capacity-fact">
+      <span class="stat-label">Prozesse</span>
+      <strong id="stat-processes">{{ data.capacity.processes }}</strong>
+      <span class="muted small">streamlink + ffmpeg</span>
+    </div>
+    <div class="capacity-fact">
+      <span class="stat-label">Speicher</span>
+      <strong id="stat-memory">
+        {%- if data.capacity.mem_limit_mb -%}
+          {{ data.capacity.mem_used_mb }} / {{ data.capacity.mem_limit_mb }} MB
+        {%- else -%}
+          {{ data.capacity.mem_used_mb }} MB
+        {%- endif -%}
+      </strong>
+      <span class="muted small">{% if data.capacity.mem_limit_mb %}belegt vom Limit{% else %}belegt (kein cgroup-Limit){% endif %}</span>
+    </div>
+    <div class="capacity-fact">
+      <span class="stat-label">Twitch-Anfragen</span>
+      <strong id="stat-gql">{{ data.capacity.gql_requests_last_cycle }}</strong>
+      <span class="muted small">je Zyklus (Batch-Größe {{ data.capacity.poll_batch_size }})</span>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
     <h2>Streamer</h2>
     <a class="btn btn-ghost" href="/streamers">verwalten</a>
   </div>

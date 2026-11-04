@@ -8,6 +8,16 @@ services:
     restart: unless-stopped
     # Supervisor lässt laufende Zusammenbauten bis zu 90 s auslaufen.
     stop_grace_period: 120s
+    # 40 Streams = bis zu 80 Kindprozesse (streamlink + ffmpeg) plus Sockets.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # Ressourcen-Empfehlung für 40 gleichzeitige 720p60-Streams.
+    # Bewusst nicht aktiv: Der Host hat nur 10 GB RAM, aktiviert würde Docker
+    # bei knappem Speicher hart eingreifen. Auf einem größeren Host einkommentieren:
+    # mem_limit: 8g
+    # cpus: 4.0
     ports:
       - "${PORT:-8000}:8000"
     volumes:

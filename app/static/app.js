@@ -186,6 +186,25 @@ async function refreshDashboard() {
   if (diskPath) diskPath.textContent = data.disk.path || "";
   const bufferElement = $("#stat-buffer");
   if (bufferElement) bufferElement.textContent = `${Math.round(buffer)} s`;
+
+  const capacity = data.capacity || {};
+  const capacityElement = $("#stat-capacity");
+  if (capacityElement) {
+    capacityElement.textContent = `${capacity.active ?? 0} / ${capacity.max_concurrent ?? 0}`;
+  }
+  const queuedElement = $("#stat-queued");
+  if (queuedElement) queuedElement.textContent = String(capacity.queued ?? 0);
+  const processElement = $("#stat-processes");
+  if (processElement) processElement.textContent = String(capacity.processes ?? 0);
+  const memoryElement = $("#stat-memory");
+  if (memoryElement) {
+    memoryElement.textContent = capacity.mem_limit_mb
+      ? `${capacity.mem_used_mb ?? 0} / ${capacity.mem_limit_mb} MB`
+      : `${capacity.mem_used_mb ?? 0} MB`;
+  }
+  const gqlElement = $("#stat-gql");
+  if (gqlElement) gqlElement.textContent = String(capacity.gql_requests_last_cycle ?? 0);
+
   const mode = $("#twitch-mode");
   if (mode) mode.textContent = `Twitch: ${data.twitch_mode}`;
 
@@ -229,6 +248,54 @@ function initDashboard() {
 }
 
 /* ---------------------------------------------------------------- Streamer */
+function renderBulkReport(container, items) {
+  if (!container) return;
+  container.replaceChildren();
+  const problems = (items || []).filter((item) => item.status !== "added");
+  if (problems.length === 0) {
+    container.hidden = true;
+    return;
+  }
+  const heading = document.createElement("p");
+  heading.className = "muted small";
+  heading.textContent = "Nicht hinzugefügt:";
+  const list = document.createElement("ul");
+  list.className = "bulk-issues";
+  for (const item of problems) {
+    const entry = document.createElement("li");
+    const code = document.createElement("code");
+    code.textContent = item.input || item.login || "–";
+    entry.append(code, document.createTextNode(` — ${item.detail || item.status}`));
+    list.append(entry);
+  }
+  container.append(heading, list);
+  container.hidden = false;
+}
+
+function initStreamerFilter(table) {
+  const input = $("#streamer-filter");
+  const counter = $("#streamer-count");
+  const rows = $$("tbody tr[data-streamer-id]", table);
+  if (!rows.length) {
+    if (counter) counter.textContent = "0 von 0";
+    return;
+  }
+  const apply = () => {
+    const query = (input?.value || "").trim().toLowerCase();
+    let visible = 0;
+    for (const row of rows) {
+      const login = (row.dataset.login || "").toLowerCase();
+      const name = (row.dataset.displayName || "").toLowerCase();
+      const matches = !query || login.includes(query) || name.includes(query);
+      row.hidden = !matches;
+      if (matches) visible += 1;
+    }
+    if (counter) counter.textContent = `${visible} von ${rows.length}`;
+  };
+  if (input) input.addEventListener("input", apply);
+  apply();
+}
+
 function initStreamers() {
   const form = $("#add-streamer-form");
   if (form) {
@@ -250,8 +317,55 @@ function initStreamers() {
     });
   }
 
+  const bulkForm = $("#bulk-import-form");
+  if (bulkForm) {
+    bulkForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = $("button[type=submit]", bulkForm);
+      const summary = $("#bulk-result");
+      const report = $("#bulk-report");
+      const input = bulkForm.elements.input.value;
+      if (!input.trim()) {
+        if (summary) {
+          summary.className = "error-text";
+          summary.textContent = "Bitte mindestens einen Kanal eingeben.";
+        }
+        return;
+      }
+      button.disabled = true;
+      if (summary) {
+        summary.className = "muted small";
+        summary.textContent = "importiert …";
+      }
+      try {
+        const result = await api("/api/streamers/bulk", { method: "POST", body: { input } });
+        const counts = result.counts || {};
+        if (summary) {
+          summary.className = "small";
+          summary.textContent = `${counts.added || 0} hinzugefügt, ${counts.duplicate || 0} bereits vorhanden, ${counts.not_found || 0} nicht gefunden, ${counts.invalid || 0} ungültig`;
+        }
+        renderBulkReport(report, result.items);
+        bulkForm.elements.input.value = "";
+        toast("Import abgeschlossen.", "success");
+        if ((counts.added || 0) > 0) {
+          setTimeout(() => window.location.reload(), 2500);
+        }
+      } catch (error) {
+        if (summary) {
+          summary.className = "error-text";
+          summary.textContent = error.message;
+        }
+        toast(error.message, "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
+
   const table = $("#streamer-table");
   if (!table) return;
+
+  initStreamerFilter(table);
 
   table.addEventListener("click", async (event) => {
     const button = event.target.closest("button");
@@ -356,6 +470,7 @@ function initSettings() {
       quality: form.elements.quality.value.trim(),
       retention_days: parseInt(form.elements.retention_days.value, 10),
       max_gb_per_streamer: parseInt(form.elements.max_gb_per_streamer.value, 10),
+      max_concurrent_streams: parseInt(form.elements.max_concurrent_streams.value, 10),
       audio_enabled: form.elements.audio_enabled.checked,
       weights: {
         chat_rate: parseFloat(form.elements.weight_chat_rate.value),
