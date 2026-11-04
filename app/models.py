@@ -82,6 +82,7 @@ class SignalSample(Base):
     ts: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow, index=True)
     score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     components: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 class LogEntry(Base):

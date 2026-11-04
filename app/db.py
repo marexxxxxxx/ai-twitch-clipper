@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -64,6 +64,15 @@ async def create_schema() -> None:
     engine = init_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+async def ensure_signal_detail_column(engine: AsyncEngine | None = None) -> None:
+    """Ergänzt die ``detail``-Spalte in bestehenden SQLite-Datenbanken."""
+    resolved = engine if engine is not None else init_engine()
+    async with resolved.begin() as conn:
+        columns = (await conn.execute(text("PRAGMA table_info(signal_sample)"))).all()
+        if columns and "detail" not in {row[1] for row in columns}:
+            await conn.execute(text("ALTER TABLE signal_sample ADD COLUMN detail JSON"))
 
 
 async def dispose_engine() -> None:

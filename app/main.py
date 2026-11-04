@@ -15,7 +15,7 @@ from .api import dashboard as dashboard_api
 from .api import health, recordings, settings as settings_api, streamers
 from .clip.assembler import ClipAssembler
 from .config import get_config
-from .db import create_schema, dispose_engine, get_sessionmaker
+from .db import create_schema, dispose_engine, ensure_signal_detail_column, get_sessionmaker
 from .logging_setup import configure_logging, log_hub
 from .retention import RetentionLoop, reconcile_interrupted_recordings
 from .runtime_settings import SettingsService, seed_defaults
@@ -34,6 +34,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("AI Twitch Clipper startet (DB: %s)", config.db_path)
 
     await create_schema()
+    await ensure_signal_detail_column()
     async with get_sessionmaker()() as session:
         await seed_defaults(session, config)
 
