@@ -138,7 +138,7 @@ Eine fertige 300-s-Sequenz belegt ca. 130 MB.
 **Empfehlung für 40 × 720p60:** 4 CPU-Kerne, 8 GB RAM, 200 Mbit/s Netzwerk,
 SSD mit mindestens 100 GB freiem Speicher. Bei 480p halbieren sich Bandbreite
 und Schreiblast. Der hier vermessene Host (2 Kerne, 4,1 GiB verfügbar, 58 GB
-frei) reicht für 40 × 720p60 **nicht**; auf diesem Host sind 15–20 Streams
+frei) reicht für 40 × 720p60 **nicht**; auf diesem Host sind ~10–12 Streams
 realistisch.
 
 `max_concurrent_streams` (Standard 40, 1–200) begrenzt, wie viele Live-Kanäle

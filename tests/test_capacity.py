@@ -39,6 +39,7 @@ EXPECTED_KEYS = {
     "guard_reason",
     "poll_batch_size",
     "gql_requests_last_cycle",
+    "clip_requests_last_cycle",
 }
 
 MB = 1024**2
@@ -229,6 +230,24 @@ async def test_start_warns_when_host_fallback_and_limit_above_20(
     assert "Limit prüfen" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_start_does_not_warn_when_host_has_enough_ram(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    _patch_memory(tmp_path, monkeypatch, limit="max", current=512 * MB)
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=16384)
+    supervisor = Supervisor(
+        FakeTwitch({}),
+        FakeSettingsService({"max_concurrent_streams": 40}),
+        config=AppConfig(storage_root=tmp_path, data_dir=tmp_path),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await supervisor._warn_memory_guard_start()  # noqa: SLF001
+
+    assert "Host hat nur" not in caplog.text
+
+
 # -- Snapshot / Contract ---------------------------------------------------
 def make_state(name: str) -> SimpleNamespace:
     return SimpleNamespace(streamer_id=0, login="x", state=name, queue_position=None)
@@ -245,6 +264,7 @@ class FakeSupervisor:
         self.enabled_logins = ["a", "b", "c"]
         self.total_streamers = 5
         self.gql_requests_last_cycle = 2
+        self.clip_requests_last_cycle = 1
 
 
 @pytest.mark.asyncio
@@ -271,6 +291,7 @@ async def test_capacity_snapshot_has_exact_contract(tmp_path, monkeypatch) -> No
         "guard_reason": None,
         "poll_batch_size": 15,
         "gql_requests_last_cycle": 2,
+        "clip_requests_last_cycle": 1,
     }
 
 

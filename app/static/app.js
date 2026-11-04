@@ -25,6 +25,18 @@ function toast(message, kind = "info") {
   }, kind === "error" ? 6000 : 3500);
 }
 
+function formatErrorDetail(detail) {
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) =>
+        item && typeof item === "object" ? item.msg || "" : String(item ?? "")
+      )
+      .filter(Boolean)
+      .join("; ");
+  }
+  return detail ? String(detail) : "";
+}
+
 async function api(url, options = {}) {
   const config = { ...options, headers: { ...(options.headers || {}) } };
   if (config.body && typeof config.body !== "string") {
@@ -37,7 +49,7 @@ async function api(url, options = {}) {
     let detail = "";
     try {
       const payload = contentType.includes("application/json") ? await response.json() : null;
-      detail = payload?.detail || "";
+      detail = formatErrorDetail(payload?.detail);
     } catch (_error) {
       /* ignore */
     }
@@ -206,6 +218,8 @@ async function refreshDashboard() {
   }
   const gqlElement = $("#stat-gql");
   if (gqlElement) gqlElement.textContent = String(capacity.gql_requests_last_cycle ?? 0);
+  const clipGqlElement = $("#stat-clip-gql");
+  if (clipGqlElement) clipGqlElement.textContent = String(capacity.clip_requests_last_cycle ?? 0);
 
   const mode = $("#twitch-mode");
   if (mode) mode.textContent = `Twitch: ${data.twitch_mode}`;

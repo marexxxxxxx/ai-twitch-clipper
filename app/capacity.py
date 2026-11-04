@@ -195,6 +195,13 @@ def _last_cycle_requests(supervisor: Any) -> int:
         return 0
 
 
+def _clip_last_cycle_requests(supervisor: Any) -> int:
+    try:
+        return int(getattr(supervisor, "clip_requests_last_cycle", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 async def capacity_snapshot(supervisor: Any, settings: dict[str, Any] | None) -> dict[str, Any]:
     """Kapazitäts-Contract für UI und Dashboard (Schlüssel sind stabil)."""
     states = list(getattr(supervisor, "states", {}).values())
@@ -225,4 +232,5 @@ async def capacity_snapshot(supervisor: Any, settings: dict[str, Any] | None) ->
         "guard_reason": guard_reason,
         "poll_batch_size": BATCH_CHUNK_SIZE,
         "gql_requests_last_cycle": _last_cycle_requests(supervisor),
+        "clip_requests_last_cycle": _clip_last_cycle_requests(supervisor),
     }

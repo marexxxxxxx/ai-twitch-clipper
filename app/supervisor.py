@@ -29,6 +29,7 @@ from .runtime_settings import SettingsService, storage_path
 from .timeutil import iso, utcnow
 from .twitch.chat import ChatMessage, ChatReader
 from .twitch.client import TwitchClient
+from .twitch.gql import CLIP_BATCH_SIZE, chunk_logins
 from .twitch.types import Channel, Clip, UserNotFound
 
 logger = logging.getLogger(__name__)
@@ -617,6 +618,7 @@ class Supervisor:
         self.cache_updated_at = 0.0
         self.cache_version = 0
         self.gql_requests_last_cycle = 0
+        self.clip_requests_last_cycle = 0
         self.enabled_logins: list[str] = []
         self.total_streamers = 0
         self._cache_lock = asyncio.Lock()
@@ -650,12 +652,17 @@ class Supervisor:
         except Exception:  # noqa: BLE001
             settings = {}
         streams = capacity.max_concurrent_streams(settings)
-        if streams <= 20:
+        # Nur warnen, wenn der freie Host-RAM für die konfigurierte Grenze
+        # tatsächlich knapp ist (Richtwert ~120 MB je Stream plus Reserve).
+        needed_mb = streams * 120 + 512
+        available_mb = available // capacity.MB
+        if available_mb >= needed_mb:
             return
         logger.warning(
-            "Host hat nur %.1f GB verfügbar; %d Streams brauchen ~4,7 GB – Limit prüfen.",
+            "Host hat nur %.1f GB verfügbar; %d Streams brauchen ~%.1f GB – Limit prüfen.",
             available / (1024**3),
             streams,
+            needed_mb / 1024,
         )
 
     async def stop(self) -> None:
@@ -748,9 +755,12 @@ class Supervisor:
         self.enabled_logins = logins
         self._last_refresh_attempt = time.monotonic()
         if not logins:
+            async with self._cache_lock:
+                self._evict_disabled(set())
             self.cache_updated_at = time.monotonic()
             self.cache_version += 1
             self.gql_requests_last_cycle = 0
+            self.clip_requests_last_cycle = 0
             return
         async with self._cache_lock:
             await self._refresh_cache(logins)
@@ -774,38 +784,62 @@ class Supervisor:
     async def _clip_poll_once(self) -> None:
         """Holt Clips nur für aktuell live gemeldete Streamer.
 
-        Chunks laufen über den Client (``CLIP_BATCH_SIZE``). Bei einem
-        Chunk-Fehler bleibt der letzte bekannte Clip-Cache stehen; der Loop
-        wartet anschließend das normale Intervall ab (kein Tight-Loop).
+        Chunks laufen über den Client (``CLIP_BATCH_SIZE``). Die HTTP-Anfragen
+        passieren bewusst **außerhalb** von ``_cache_lock``, damit ein langer
+        Clip-Poll den Live-Poll nicht blockiert. Bei einem Chunk-Fehler bleibt
+        der letzte bekannte Clip-Cache stehen; der Loop wartet anschließend
+        das normale Intervall ab (kein Tight-Loop).
         """
-        live_logins = sorted(
-            login for login, channel in self.channel_cache.items() if channel.is_live
-        )
+        async with self._cache_lock:
+            live_logins = sorted(
+                login for login, channel in self.channel_cache.items() if channel.is_live
+            )
         if not live_logins:
+            self.clip_requests_last_cycle = 0
+            return
+        fetch = getattr(self.twitch, "fetch_clips_batch", None)
+        # Clip-POSTs je Zyklus: ein POST pro Chunk (bzw. je Login im Fallback).
+        # Der Live-Zähler bleibt davon unberührt (eigene Zählvariable).
+        if callable(fetch):
+            self.clip_requests_last_cycle = len(chunk_logins(live_logins, CLIP_BATCH_SIZE))
+        else:  # pragma: no cover - Fallback für Fremd-Clients
+            self.clip_requests_last_cycle = len(live_logins)
+        try:
+            if callable(fetch):
+                clips_by_login = await fetch(live_logins)
+            else:  # pragma: no cover - Fallback für Fremd-Clients
+                clips_by_login = {}
+                for login in live_logins:
+                    clips_by_login[login] = await self.twitch.fetch_clips(login)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Clip-Poll fehlgeschlagen (%d Live-Streamer), nutze letzten Cache: %s",
+                len(live_logins),
+                exc,
+            )
             return
         async with self._cache_lock:
-            fetch = getattr(self.twitch, "fetch_clips_batch", None)
-            try:
-                if callable(fetch):
-                    clips_by_login = await fetch(live_logins)
-                else:  # pragma: no cover - Fallback für Fremd-Clients
-                    clips_by_login = {}
-                    for login in live_logins:
-                        clips_by_login[login] = await self.twitch.fetch_clips(login)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Clip-Poll fehlgeschlagen (%d Live-Streamer), nutze letzten Cache: %s",
-                    len(live_logins),
-                    exc,
-                )
-                return
             for login, clips in clips_by_login.items():
                 self.clips_cache[login] = list(clips)
 
+    def _evict_disabled(self, enabled: set[str]) -> None:
+        """Entfernt deaktivierte/gelöschte Logins aus beiden Poll-Caches."""
+        for login in list(self.channel_cache):
+            if login not in enabled:
+                self.channel_cache.pop(login, None)
+        for login in list(self.clips_cache):
+            if login not in enabled:
+                self.clips_cache.pop(login, None)
+
     async def _refresh_cache(self, logins: list[str]) -> bool:
         """Holt einen Batch und aktualisiert die Caches; True bei Erfolg."""
+        enabled = {
+            str(login).strip().lower()
+            for login in (self.enabled_logins or logins)
+        }
+        self._evict_disabled(enabled)
         reset = getattr(self.twitch, "reset_request_counter", None)
         if callable(reset):
             reset()

@@ -68,9 +68,14 @@
       <span class="muted small">{% if data.capacity.mem_limit_mb %}belegt vom Limit{% else %}belegt (kein cgroup-Limit){% endif %}</span>
     </div>
     <div class="capacity-fact">
-      <span class="stat-label">Twitch-Anfragen</span>
+      <span class="stat-label">Live-Poll-Anfragen</span>
       <strong id="stat-gql">{{ data.capacity.gql_requests_last_cycle }}</strong>
-      <span class="muted small">je Zyklus (Batch à {{ data.capacity.poll_batch_size }}; 40 Kanäle = 3 Anfragen)</span>
+      <span class="muted small">Twitch-Anfragen je Zyklus (Batch à {{ data.capacity.poll_batch_size }}; 40 Kanäle = 3 Anfragen)</span>
+    </div>
+    <div class="capacity-fact">
+      <span class="stat-label">Clip-Poll-Anfragen</span>
+      <strong id="stat-clip-gql">{{ data.capacity.clip_requests_last_cycle }}</strong>
+      <span class="muted small">Twitch-Anfragen je Zyklus (separater Clip-Batch)</span>
     </div>
   </div>
 </section>

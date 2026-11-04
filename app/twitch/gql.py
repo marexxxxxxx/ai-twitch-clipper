@@ -184,8 +184,9 @@ class GQLClient:
                     # gemeinsam (einzelne Aliase fehlen). Vorhandene Daten
                     # behalten; nur fehlende Aliase gelten als Fehler.
                     if isinstance(payload, dict) and payload:
-                        logger.warning("Twitch GQL Teil-Antwort (%s); nutze vorhandene Daten", messages)
+                        logger.debug("Twitch GQL Teil-Antwort (%s); nutze vorhandene Daten", messages)
                         return payload
+                    logger.warning("Twitch GQL Fehler ohne nutzbare Daten: %s", messages)
                     raise TwitchError(f"Twitch GQL: {messages}")
                 return payload or {}
             except (httpx.HTTPError, TwitchUnavailable) as exc:

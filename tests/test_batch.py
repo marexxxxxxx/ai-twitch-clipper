@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
 import pytest
@@ -18,7 +19,7 @@ from app.twitch.gql import (
     build_clips_batch_query,
 )
 from app.twitch.helix import HelixClient
-from app.twitch.types import Channel
+from app.twitch.types import Channel, TwitchError
 
 
 def test_batch_query_declares_all_aliases_and_variables() -> None:
@@ -217,6 +218,31 @@ async def test_supervisor_poll_cycle_for_40_streamers_uses_two_posts(
 
 
 @pytest.mark.asyncio
+async def test_refresh_cache_evicts_disabled_logins_and_clip_poll_skips_them(
+    tmp_path,
+) -> None:
+    calls: list[list[str]] = []
+    client, http = make_gql(batch_handler(calls, unknown=set()))
+    config = AppConfig(storage_root=tmp_path, data_dir=tmp_path)
+    supervisor = Supervisor(client, SettingsService(ttl=0.0), config=config)
+    supervisor.enabled_logins = ["alpha"]
+    supervisor.channel_cache = {
+        "alpha": client_channel("alpha"),
+        "beta": client_channel("beta"),
+    }
+    supervisor.clips_cache = {"alpha": [], "beta": []}
+    try:
+        await supervisor._refresh_cache(["alpha"])  # noqa: SLF001
+        await supervisor._clip_poll_once()  # noqa: SLF001
+    finally:
+        await http.aclose()
+
+    assert set(supervisor.channel_cache) == {"alpha"}
+    assert set(supervisor.clips_cache) == {"alpha"}
+    assert calls and all("beta" not in chunk for chunk in calls)
+
+
+@pytest.mark.asyncio
 async def test_clip_poll_chunks_live_logins_and_keeps_last_cache_on_chunk_error(
     tmp_path,
 ) -> None:
@@ -275,6 +301,7 @@ async def test_clip_poll_chunks_live_logins_and_keeps_last_cache_on_chunk_error(
     ]
     assert [len(chunk) for chunk in calls] == expected_chunks
     assert all("offline" not in chunk for chunk in calls)
+    assert supervisor.clip_requests_last_cycle == len(expected_chunks)
     # Der ausgefallene erste Chunk behält seinen letzten Cache,
     # die übrigen Chunks werden übernommen.
     assert all(supervisor.clips_cache[login] == [] for login in failed_chunk)
@@ -294,7 +321,7 @@ def client_channel(login: str, is_live: bool = True) -> Channel:
 
 
 @pytest.mark.asyncio
-async def test_partial_gql_response_keeps_present_channels() -> None:
+async def test_partial_gql_response_keeps_present_channels(caplog) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         variables = payload["variables"]
@@ -311,12 +338,38 @@ async def test_partial_gql_response_keeps_present_channels() -> None:
 
     client, http = make_gql(handler)
     try:
-        channels = await client.fetch_channels_batch(["alpha", "beta"])
+        with caplog.at_level(logging.DEBUG):
+            channels = await client.fetch_channels_batch(["alpha", "beta"])
     finally:
         await http.aclose()
 
     assert set(channels) == {"alpha"}
     assert channels["alpha"].login == "alpha"
+    # Teil-Antworten mit nutzbaren Daten sind Debug-Rauschen, keine Warnung.
+    assert "Teil-Antwort" in caplog.text
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and "Teil-Antwort" in record.getMessage()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gql_error_without_data_logs_warning(caplog) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"errors": [{"message": "rate limited"}]})
+
+    client, http = make_gql(handler)
+    try:
+        with caplog.at_level(logging.WARNING), pytest.raises(TwitchError):
+            await client.fetch_channels_batch(["alpha"])
+    finally:
+        await http.aclose()
+
+    assert any(
+        record.levelno >= logging.WARNING and "ohne nutzbare Daten" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
