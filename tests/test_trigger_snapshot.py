@@ -50,6 +50,18 @@ class FakeAssembler:
         return BuildResult(status="failed", error="Testfehler")
 
 
+class StalledRecorder(FakeRecorder):
+    """Wanduhr läuft weiter, CSV-Medienzeit bleibt bei 260 s stehen."""
+
+    media_end = 260.0
+
+    def media_time(self, wall: datetime) -> float:
+        return 300.0
+
+    def buffer_seconds(self, max_buffer_s: float = 360.0) -> float:
+        return 260.0
+
+
 class FakeSupervisor:
     def __init__(self, settings: dict[str, Any]) -> None:
         self.settings_service = FakeSettingsService(settings)
@@ -101,3 +113,37 @@ async def test_components_detail_is_frozen_at_trigger(tmp_path: Path, session_fa
         row = await db.get(Recording, recording_id)
         assert row is not None
         assert row.trigger["components_detail"]["marker"] == "trigger"
+
+
+async def test_trigger_time_is_clamped_to_media_end_and_manual_sets_cooldown(
+    tmp_path: Path, session_factory
+) -> None:
+    settings = {
+        "storage_root": str(tmp_path),
+        "pre_roll_s": 240,
+        "post_roll_s": 60,
+        "threshold": 0.6,
+        "cooldown_s": 180,
+        "weights": dict(DEFAULT_WEIGHTS),
+    }
+    supervisor = FakeSupervisor(settings)
+    streamer = StreamerRef(id=1, login="alice", display_name="Alice", enabled=True)
+    async with session_factory() as db:
+        db.add(Streamer(id=1, login="alice", display_name="Alice", enabled=True))
+        await db.commit()
+
+    session = LiveSession(supervisor, streamer, "stream-1", settings)
+    session.recorder = StalledRecorder()
+
+    recording_id = await session.trigger("manual", manual=True, reason="Test")
+    assert session.detector.cooldown_remaining() > 0
+
+    async with session_factory() as db:
+        row = await db.get(Recording, recording_id)
+        assert row is not None
+        # Wanduhr würde 300 s liefern; der Puffer endet aber bei 260 s.
+        assert row.trigger["media_trigger_s"] == 260.0
+
+    await asyncio.wait_for(supervisor.assembler.started.wait(), timeout=5)
+    supervisor.assembler.gate.set()
+    await asyncio.gather(*list(session._assemblies), return_exceptions=True)

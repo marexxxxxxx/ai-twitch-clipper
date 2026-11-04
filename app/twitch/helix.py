@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 HELIX = "https://api.twitch.tv/helix"
 
+#: Helix kennt keine Batch-Alias-Anfrage; Einzelabfragen laufen begrenzt parallel.
+BATCH_CONCURRENCY = 5
+
 
 class HelixClient:
     def __init__(
@@ -41,6 +44,12 @@ class HelixClient:
         self._token: str | None = None
         self._token_expires = 0.0
         self._token_lock = asyncio.Lock()
+        #: Anzahl der in diesem Poll-Zyklus abgesetzten Requests.
+        self.requests_last_cycle = 0
+
+    def begin_cycle(self) -> None:
+        """Setzt den Request-Zähler zu Beginn eines Poll-Zyklus zurück."""
+        self.requests_last_cycle = 0
 
     async def close(self) -> None:
         if self._owns_client:
@@ -71,11 +80,14 @@ class HelixClient:
             return self._token
 
     async def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
-        token = await self._access_token()
-        headers = {"Client-ID": self._client_id, "Authorization": f"Bearer {token}"}
         last_error: Exception | None = None
         for attempt in range(3):
+            # Token/Header bei jedem Versuch neu bilden, damit ein 401-Refresh
+            # innerhalb desselben Aufrufs tatsächlich mit dem neuen Token läuft.
+            token = await self._access_token()
+            headers = {"Client-ID": self._client_id, "Authorization": f"Bearer {token}"}
             try:
+                self.requests_last_cycle += 1
                 response = await self._http.get(HELIX + path, params=params, headers=headers)
                 if response.status_code in (429, 500, 502, 503, 504):
                     raise TwitchUnavailable(f"Helix HTTP {response.status_code}")
@@ -118,6 +130,47 @@ class HelixClient:
             stream_id=str(stream.get("id")) if stream and stream.get("id") else None,
             clips=clips,
         )
+
+    async def fetch_channels_batch(self, logins: list[str]) -> dict[str, Channel]:
+        """Fallback ohne Helix-Batch: Einzelabfragen parallel, max. 5 gleichzeitig.
+
+        Unbekannte Logins fehlen im Ergebnis; einzelne Fehler brechen den
+        restlichen Batch nicht ab.
+        """
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in logins:
+            login = str(raw or "").strip().lower()
+            if not login or login in seen:
+                continue
+            seen.add(login)
+            normalized.append(login)
+        if not normalized:
+            return {}
+
+        semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
+
+        async def fetch_one(login: str) -> tuple[str, Channel | None]:
+            async with semaphore:
+                try:
+                    return login, await self.fetch_channel(login)
+                except UserNotFound:
+                    return login, None
+
+        results = await asyncio.gather(
+            *(fetch_one(login) for login in normalized), return_exceptions=True
+        )
+        channels: dict[str, Channel] = {}
+        for item in results:
+            if isinstance(item, asyncio.CancelledError):
+                raise item
+            if isinstance(item, BaseException):
+                logger.warning("Helix-Batch-Teilabfrage fehlgeschlagen: %s", item)
+                continue
+            login, channel = item
+            if channel is not None:
+                channels[login] = channel
+        return channels
 
     async def fetch_clips(self, login: str, broadcaster_id: str | None = None) -> list[Clip]:
         if not broadcaster_id:

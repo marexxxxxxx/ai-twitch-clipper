@@ -105,3 +105,43 @@ async def test_helix_channel_parsing() -> None:
     assert channel.game_name == "VALORANT"
     assert len(channel.clips) == 1
     assert channel.clips[0].duration_s == 30.0
+
+
+@pytest.mark.asyncio
+async def test_helix_refreshes_token_after_401_in_same_call() -> None:
+    calls = {"token": 0, "users": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "id.twitch.tv":
+            calls["token"] += 1
+            token = "token1" if calls["token"] == 1 else "token2"
+            return httpx.Response(200, json={"access_token": token, "expires_in": 3600})
+        authorization = request.headers.get("Authorization")
+        if request.url.path.endswith("/users"):
+            calls["users"] += 1
+            if authorization == "Bearer token1":
+                return httpx.Response(401, json={"message": "invalid token"})
+            assert authorization == "Bearer token2"
+            return httpx.Response(
+                200, json={"data": [{"id": "42", "login": "shroud", "display_name": "shroud"}]}
+            )
+        if request.url.path.endswith("/streams"):
+            assert authorization == "Bearer token2"
+            return httpx.Response(200, json={"data": []})
+        if request.url.path.endswith("/clips"):
+            assert authorization == "Bearer token2"
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(404, json={"message": "unexpected"})
+
+    transport = httpx.MockTransport(handler)
+    http = httpx.AsyncClient(transport=transport, timeout=5)
+    client = HelixClient("client-id", "secret", http_client=http)
+    try:
+        channel = await client.fetch_channel("shroud")
+    finally:
+        await http.aclose()
+
+    assert channel.id == "42"
+    assert channel.is_live is False
+    assert calls["token"] == 2
+    assert calls["users"] == 2

@@ -57,6 +57,19 @@ def _concat_line(path: Path) -> str:
     return f"file '{escaped}'\n"
 
 
+async def _reap(process: asyncio.subprocess.Process) -> None:
+    """Beendet einen Kindprozess hart und wartet ihn ab (keine Zombies)."""
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except (asyncio.TimeoutError, ProcessLookupError):
+        pass
+
+
 async def _run(cmd: list[str], timeout: float = 120.0) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -66,9 +79,12 @@ async def _run(cmd: list[str], timeout: float = 120.0) -> tuple[int, str, str]:
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
+        await _reap(process)
         return -1, "", f"Timeout nach {timeout:.0f}s: {' '.join(cmd[:3])}"
+    except asyncio.CancelledError:
+        # Beim Herunterfahren/Abbrechen darf kein ffmpeg weiterlaufen.
+        await asyncio.shield(_reap(process))
+        raise
     return (
         process.returncode or 0,
         stdout.decode("utf-8", errors="replace").strip(),
@@ -202,6 +218,8 @@ class ClipAssembler:
             window_start_rel = 0.0
 
         ring_buffer.protect(window_start_rel, window_end_rel)
+        temp_path: Path | None = None
+        published = False
         try:
             complete = True
             available = 0.0
@@ -296,6 +314,7 @@ class ClipAssembler:
                 )
 
             os.replace(temp_path, final_path)
+            published = True
             size_bytes = final_path.stat().st_size
             thumbnail = final_path.with_suffix(".jpg")
             thumb_ok = await make_thumbnail(final_path, thumbnail)
@@ -356,6 +375,8 @@ class ClipAssembler:
                 sidecar=sidecar_data,
             )
         finally:
+            if temp_path is not None and not published:
+                temp_path.unlink(missing_ok=True)
             ring_buffer.unprotect()
 
     async def _fallback_remux(

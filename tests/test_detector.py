@@ -100,3 +100,13 @@ def test_trigger_reason_names_components() -> None:
     reason = describe_trigger(components(1.0), sanitize_weights(None))
     assert "Chat-Rate" in reason
     assert "Neuer Clip" in reason
+
+
+def test_mark_triggered_starts_cooldown_for_manual_trigger() -> None:
+    detector = Detector(threshold=0.60, cooldown_s=180, pre_roll_s=240, weights=WEIGHTS)
+    detector.mark_triggered(NOW)
+    assert 179 <= detector.cooldown_remaining(NOW + timedelta(seconds=1)) <= 180
+    detector.update(components(0.9), now=NOW + timedelta(seconds=2), buffer_s=300)
+    blocked = detector.update(components(0.9), now=NOW + timedelta(seconds=7), buffer_s=300)
+    assert not blocked.trigger
+    assert blocked.cooldown_remaining_s > 0

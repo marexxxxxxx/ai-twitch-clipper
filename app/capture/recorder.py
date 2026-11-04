@@ -9,12 +9,32 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from ..timeutil import utcnow
 
 logger = logging.getLogger(__name__)
 
 SEGMENT_RE = re.compile(r"^(?P<name>[^,]+),(?P<start>-?\d+(?:\.\d+)?),(?P<end>-?\d+(?:\.\d+)?)\s*$")
+#: ffmpeg schreibt die CSV selbst um, sobald mehr als N Einträge vorhanden sind.
+#: 400 Einträge = 800 s bei 2-s-Segmenten (> 2× Ringpufferfenster).
+INDEX_MAX_ENTRIES = 400
+_URL_RE = re.compile(r"(?:https?|rtmp)://[^\s'\"<>]+")
+
+
+def redact_urls(text: str) -> str:
+    """Entfernt Pfad/Query signierter Stream-URLs aus Logzeilen."""
+
+    def replace(match: re.Match[str]) -> str:
+        try:
+            parts = urlsplit(match.group(0))
+            if parts.scheme and parts.netloc:
+                return f"{parts.scheme}://{parts.netloc}/…"
+        except ValueError:
+            pass
+        return "<url>"
+
+    return _URL_RE.sub(replace, text)
 
 
 class RecorderError(Exception):
@@ -63,6 +83,8 @@ class SegmentRecorder:
         self.started_monotonic = 0.0
         self.wall_offset = 0.0
         self._segments: dict[str, Segment] = {}
+        self._index_offset = 0
+        self._last_index_line = b""
         self._first_segment_seen = False
 
         self._streamlink: asyncio.subprocess.Process | None = None
@@ -130,6 +152,8 @@ class SegmentRecorder:
             str(self.index_path),
             "-segment_list_type",
             "csv",
+            "-segment_list_size",
+            str(INDEX_MAX_ENTRIES),
             "-reset_timestamps",
             "1",
             str(self.buffer_dir / "seg_%05d.ts"),
@@ -246,11 +270,64 @@ class SegmentRecorder:
 
     # -- Index / Zeit -------------------------------------------------------
     def refresh(self) -> None:
+        """Liest nur neue CSV-Zeilen ab dem gemerkten Byte-Offset.
+
+        ffmpeg rotiert die Liste über ``-segment_list_size`` selbst. Dabei kann
+        die Datei kleiner werden oder an gleicher Größe andere Zeilen enthalten;
+        das wird über die zuletzt gelesene Zeile erkannt und löst einen einmaligen
+        Rescan der (maximal ``INDEX_MAX_ENTRIES``) Zeilen aus. Im Normalfall ist
+        ein Tick damit O(neue Zeilen), nicht O(24 h).
+        """
         try:
-            content = self.index_path.read_text(encoding="utf-8", errors="replace")
+            size = self.index_path.stat().st_size
         except (FileNotFoundError, OSError):
             return
-        for line in content.splitlines():
+
+        if size < self._index_offset:
+            self._reset_index()
+        elif self._index_offset and not self._tail_matches():
+            self._reset_index()
+
+        try:
+            with self.index_path.open("rb") as handle:
+                handle.seek(self._index_offset)
+                chunk = handle.read()
+        except (FileNotFoundError, OSError):
+            return
+
+        last_newline = chunk.rfind(b"\n")
+        if last_newline < 0:
+            return
+        complete = chunk[: last_newline + 1]
+        self._index_offset += len(complete)
+        self._consume(complete)
+        previous_newline = complete.rfind(b"\n", 0, len(complete) - 1)
+        self._last_index_line = complete[previous_newline + 1 :]
+
+    def _tail_matches(self) -> bool:
+        """Prüft, ob die zuletzt gelesene Zeile noch am Offset endet."""
+        if not self._last_index_line:
+            return True
+        start = self._index_offset - len(self._last_index_line)
+        if start < 0:
+            return False
+        try:
+            with self.index_path.open("rb") as handle:
+                handle.seek(start)
+                return handle.read(len(self._last_index_line)) == self._last_index_line
+        except (FileNotFoundError, OSError):
+            return False
+
+    def _reset_index(self) -> None:
+        # Die Liste wurde umgeschrieben: Zustand neu aus der Datei aufbauen.
+        # wall_offset bleibt erhalten, weil er sich auf den Sessionstart bezieht.
+        self._segments.clear()
+        self._index_offset = 0
+        self._last_index_line = b""
+
+    def _consume(self, data: bytes) -> None:
+        text = data.decode("utf-8", errors="replace")
+        for line in text.splitlines():
             match = SEGMENT_RE.match(line.strip())
             if not match:
                 continue
@@ -274,9 +351,14 @@ class SegmentRecorder:
                 # Medienzeit 0 liegt um die Startverzögerung vor dem ersten Segment.
                 self.wall_offset = max(0.0, elapsed - end)
 
+    def forget(self, names: list[str] | tuple[str, ...]) -> None:
+        """Entfernt vom Puffer gelöschte Segmente aus dem Recorder-Zustand."""
+        for name in names:
+            self._segments.pop(name, None)
+
     def segments(self) -> list[Segment]:
         self.refresh()
-        return sorted(self._segments.values(), key=lambda segment: segment.start)
+        return list(self._segments.values())
 
     @property
     def media_end(self) -> float:
@@ -322,6 +404,7 @@ class SegmentRecorder:
                 text = line.decode("utf-8", errors="replace").strip()
                 if not text:
                     continue
+                text = redact_urls(text)
                 self._stderr_tail.append(f"{name}: {text}")
                 del self._stderr_tail[:-40]
                 lowered = text.lower()
@@ -335,4 +418,4 @@ class SegmentRecorder:
             logger.debug("stderr-Drain für %s beendet", name, exc_info=True)
 
     def _last_stderr(self) -> str:
-        return " | ".join(self._stderr_tail[-3:])
+        return " | ".join(redact_urls(line) for line in self._stderr_tail[-3:])

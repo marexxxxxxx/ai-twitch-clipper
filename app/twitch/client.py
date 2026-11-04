@@ -41,8 +41,23 @@ class TwitchClient:
     async def fetch_channel(self, login: str) -> Channel:
         return await self._impl.fetch_channel(login)
 
+    async def fetch_channels_batch(self, logins: list[str]) -> dict[str, Channel]:
+        """Zentrale Batch-Abfrage für alle überwachten Streamer."""
+        return await self._impl.fetch_channels_batch(logins)
+
     async def fetch_clips(self, login: str) -> list[Clip]:
         return await self._impl.fetch_clips(login)
+
+    def reset_request_counter(self) -> None:
+        """Setzt den Request-Zähler für den beginnenden Poll-Zyklus zurück."""
+        begin = getattr(self._impl, "begin_cycle", None)
+        if callable(begin):
+            begin()
+
+    @property
+    def gql_requests_last_cycle(self) -> int:
+        """Requests des letzten Poll-Zyklus (bei Helix: HTTP-GETs)."""
+        return int(getattr(self._impl, "requests_last_cycle", 0) or 0)
 
     async def fetch_top_live(self, limit: int = 20) -> list[Channel]:
         return await self._impl.fetch_top_live(limit)

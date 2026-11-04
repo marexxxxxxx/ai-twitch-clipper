@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .capacity import capacity_snapshot
 from .models import Recording, SignalSample, Streamer
 from .runtime_settings import storage_path
 from .timeutil import iso, utcnow
@@ -78,5 +79,6 @@ async def build_dashboard(
         "disk": disk,
         "counts": counts,
         "twitch_mode": twitch_mode,
+        "capacity": await capacity_snapshot(supervisor, settings),
         "now": iso(utcnow()),
     }

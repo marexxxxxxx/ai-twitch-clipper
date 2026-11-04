@@ -35,10 +35,18 @@ class PathCheck:
 def _check_path_sync(raw: str) -> PathCheck:
     if not raw or not str(raw).strip():
         raise StorageError("Der Speicherort darf nicht leer sein.")
-    path = Path(str(raw)).expanduser()
-    if not path.is_absolute():
-        raise StorageError("Bitte einen absoluten Pfad angeben.")
-    path = path.resolve(strict=False)
+    try:
+        text = str(raw)
+        if "\x00" in text:
+            raise StorageError("Der Pfad enthält ein ungültiges NUL-Zeichen.")
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            raise StorageError("Bitte einen absoluten Pfad angeben.")
+        path = path.resolve(strict=False)
+    except StorageError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise StorageError(f"Ungültiger Pfad: {exc}") from exc
 
     exists = path.exists()
     if exists and not path.is_dir():

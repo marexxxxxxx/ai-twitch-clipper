@@ -7,6 +7,7 @@ import contextlib
 import copy
 import logging
 import random
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from . import capacity
 from .capture.buffer import RingBuffer, buffer_path, disk_allows_start, disk_should_stop
 from .capture.recorder import RecorderError, SegmentRecorder
 from .clip.assembler import ClipAssembler
@@ -27,12 +29,14 @@ from .runtime_settings import SettingsService, storage_path
 from .timeutil import iso, utcnow
 from .twitch.chat import ChatMessage, ChatReader
 from .twitch.client import TwitchClient
-from .twitch.types import UserNotFound
+from .twitch.types import Channel, Clip, UserNotFound
 
 logger = logging.getLogger(__name__)
 
 MAX_BUFFER_S = 360
 TRIGGER_BUFFER_RESET_S = 300
+#: Cache gilt nach dem Dreifachen des Poll-Intervalls als veraltet.
+CACHE_STALE_FACTOR = 3
 
 
 class TriggerError(Exception):
@@ -66,6 +70,7 @@ class RuntimeState:
     session_started_at: datetime | None = None
     stream_id: str | None = None
     recording_id: int | None = None
+    queue_position: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -85,6 +90,7 @@ class RuntimeState:
             "session_started_at": iso(self.session_started_at),
             "stream_id": self.stream_id,
             "recording_id": self.recording_id,
+            "queue_position": self.queue_position,
         }
 
 
@@ -283,17 +289,25 @@ class LiveSession:
 
         await self._save_signal(now, decision.score, components)
 
-        # Disk-Guard: unter 1 GB laufende Aufnahme sauber beenden.
-        if disk_should_stop(self.storage_root):
-            message = "Weniger als 1 GB frei – Aufnahme wird beendet."
-            logger.error("%s (%s)", message, self.streamer.login)
-            self.runtime.last_error = message
-            self._stop.set()
-            return
+        # Disk-Guard: alten Pufferpfad UND aktuellen Zielpfad prüfen, damit ein
+        # Speicherort-Wechsel den Guard nicht auf dem falschen Volume laufen lässt.
+        target_root = storage_path(settings)
+        guarded_roots = [self.storage_root]
+        if target_root != self.storage_root:
+            guarded_roots.append(target_root)
+        for root in guarded_roots:
+            if disk_should_stop(root):
+                message = f"Weniger als 1 GB frei unter {root} – Aufnahme wird beendet."
+                logger.error("%s (%s)", message, self.streamer.login)
+                self.runtime.last_error = message
+                self._stop.set()
+                return
 
-        # Puffer regelmäßig beschneiden.
+        # Puffer regelmäßig beschneiden und den Recorder-Zustand mitziehen.
         try:
-            await self.ring.prune(self.recorder.segments(), self.recorder.media_end)
+            removed = await self.ring.prune(self.recorder.segments(), self.recorder.media_end)
+            if removed:
+                self.recorder.forget([segment.name for segment in removed])
         except Exception:  # noqa: BLE001
             logger.debug("Puffer-Pruning fehlgeschlagen", exc_info=True)
 
@@ -328,18 +342,28 @@ class LiveSession:
 
     async def _channel_loop(self) -> None:
         offline_misses = 0
+        last_version = -1
+        timeout = max(1.0, float(self.supervisor.config.live_poll_s))
         while not self._stop.is_set():
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=20.0)
+                await asyncio.wait_for(self._stop.wait(), timeout=timeout)
                 break
             except asyncio.TimeoutError:
                 pass
             try:
-                channel = await self.supervisor.twitch.fetch_channel(self.streamer.login)
+                channel = await self.supervisor.cached_channel(self.streamer.login)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Live-Check %s fehlgeschlagen: %s", self.streamer.login, exc)
+                continue
+            # Nur echte, neue Cache-Snapshots zählen: Ein unveränderter Cache
+            # (z. B. Twitch down) darf die Offline-Erkennung nicht auslösen.
+            version = self.supervisor.cache_version
+            if version == last_version:
+                continue
+            last_version = version
+            if channel is None:
                 continue
             if not channel.is_live:
                 offline_misses += 1
@@ -356,14 +380,15 @@ class LiveSession:
             await self.supervisor._touch_live(self.streamer.id)
 
     async def _clip_loop(self) -> None:
+        timeout = max(1.0, float(self.supervisor.config.clip_poll_s))
         while not self._stop.is_set():
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=30.0)
+                await asyncio.wait_for(self._stop.wait(), timeout=timeout)
                 break
             except asyncio.TimeoutError:
                 pass
             try:
-                clips = await self.supervisor.twitch.fetch_clips(self.streamer.login)
+                clips = await self.supervisor.cached_clips(self.streamer.login)
                 fresh = self.signals.add_clips(clips, utcnow())
                 if fresh:
                     logger.info("%d neue(r) Clip(s) bei %s erkannt", len(fresh), self.streamer.login)
@@ -392,9 +417,20 @@ class LiveSession:
                 )
             if self._assembly_lock.locked() or self._assembly_pending:
                 raise TriggerError("Für diesen Streamer läuft bereits ein Zusammenbau.")
+            target_root = storage_path(settings)
+            if not disk_allows_start(target_root):
+                raise TriggerError(
+                    f"Zu wenig freier Speicher unter {target_root} (< 2 GB); "
+                    "Aufnahme nicht gestartet."
+                )
 
             now = utcnow()
+            # Medienzeit aus der CSV-Zeitbasis, nicht aus der Wanduhr: Bei einem
+            # Stall würde sonst das Vorlauf-Fenster aus dem Puffer rutschen.
             media_trigger = max(0.0, self.recorder.media_time(now))
+            media_end = self.recorder.media_end
+            if media_end > 0:
+                media_trigger = min(media_trigger, media_end)
             window_start = max(0.0, media_trigger - pre_roll)
             started_at = self.recorder.wall_time(window_start)
             ended_at = self.recorder.wall_time(media_trigger + int(settings.get("post_roll_s") or 60))
@@ -435,6 +471,11 @@ class LiveSession:
                 await session.commit()
                 recording_id = recording.id
 
+            if manual:
+                # Auch ein manueller Trigger belegt den Cooldown, damit der
+                # Detektor nicht direkt danach dieselbe Szene erneut aufnimmt.
+                self.detector.mark_triggered(now)
+
             self.runtime.recording_id = recording_id
             self._assembly_pending = True
             task = asyncio.create_task(
@@ -456,6 +497,8 @@ class LiveSession:
                 media_trigger = float(trigger_info.get("media_trigger_s") or 0.0)
                 if media_trigger <= 0 and self.recorder is not None:
                     media_trigger = max(0.0, self.recorder.media_time(utcnow()))
+                    if self.recorder.media_end > 0:
+                        media_trigger = min(media_trigger, self.recorder.media_end)
                 result = await self.supervisor.assembler.build(
                     recording_id=recording_id,
                     login=self.streamer.login,
@@ -498,11 +541,13 @@ class LiveSession:
                     logger.error("Zusammenbau fehlgeschlagen (%s): %s", self.streamer.login, result.error)
                 # Puffer nach dem Zusammenbau auf 300 s zurückschneiden.
                 if self.recorder is not None:
-                    await self.ring.prune(
+                    removed = await self.ring.prune(
                         self.recorder.segments(),
                         self.recorder.media_end,
                         keep_s=TRIGGER_BUFFER_RESET_S,
                     )
+                    if removed:
+                        self.recorder.forget([segment.name for segment in removed])
             except asyncio.CancelledError:
                 await _update_recording(recording_id, status="failed", error="Dienst wurde beendet.")
                 raise
@@ -561,21 +606,38 @@ class Supervisor:
         self.sessions: dict[int, LiveSession] = {}
         self.tasks: dict[int, asyncio.Task[None]] = {}
         self.active_buffer_dirs: set[Path] = set()
+
+        # Zentraler Poll-Cache (Login -> Channel/Clips). Alle Sessions lesen
+        # hier, damit pro Zyklus nur ein Batch je 20 Streamer an Twitch geht.
+        self.channel_cache: dict[str, Channel] = {}
+        self.clips_cache: dict[str, list[Clip]] = {}
+        self.cache_updated_at = 0.0
+        self.cache_version = 0
+        self.gql_requests_last_cycle = 0
+        self.enabled_logins: list[str] = []
+        self.total_streamers = 0
+        self._cache_lock = asyncio.Lock()
+        self._last_refresh_attempt = 0.0
+
         self._reconcile_task: asyncio.Task[None] | None = None
+        self._poll_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
     # -- Start/Stop ---------------------------------------------------------
     async def start(self) -> None:
+        self._poll_task = asyncio.create_task(self._poll_loop(), name="supervisor-poll")
         self._reconcile_task = asyncio.create_task(self._reconcile_loop(), name="supervisor-reconcile")
         logger.info("Supervisor gestartet")
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._reconcile_task is not None:
-            self._reconcile_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._reconcile_task
-            self._reconcile_task = None
+        for task_attr in ("_poll_task", "_reconcile_task"):
+            task = getattr(self, task_attr)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+                setattr(self, task_attr, None)
         # Sessions zuerst stoppen, damit Prozesse sauber beendet werden.
         for session in list(self.sessions.values()):
             with contextlib.suppress(Exception):
@@ -606,6 +668,8 @@ class Supervisor:
         async with get_sessionmaker()() as session:
             rows = list((await session.execute(select(Streamer))).scalars())
         enabled_ids = {row.id for row in rows if row.enabled}
+        self.enabled_logins = [row.login for row in rows if row.enabled]
+        self.total_streamers = len(rows)
 
         for row in rows:
             if not row.enabled:
@@ -630,6 +694,126 @@ class Supervisor:
                 state = self.states.get(streamer_id)
                 if state is not None:
                     state.state = "offline"
+                    state.queue_position = None
+        self._refresh_queue_positions()
+
+    # -- Zentraler Poll-Cache ----------------------------------------------
+    async def _poll_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self._poll_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.exception("Zentraler Poll-Zyklus fehlgeschlagen")
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(), timeout=max(1.0, float(self.config.live_poll_s))
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    async def _poll_once(self) -> None:
+        """Ein Batch-Zyklus für alle aktivierten Streamer."""
+        logins = await self._load_enabled_logins()
+        self.enabled_logins = logins
+        self._last_refresh_attempt = time.monotonic()
+        if not logins:
+            self.cache_updated_at = time.monotonic()
+            self.cache_version += 1
+            self.gql_requests_last_cycle = 0
+            return
+        async with self._cache_lock:
+            await self._refresh_cache(logins)
+
+    async def _refresh_cache(self, logins: list[str]) -> bool:
+        """Holt einen Batch und aktualisiert die Caches; True bei Erfolg."""
+        reset = getattr(self.twitch, "reset_request_counter", None)
+        if callable(reset):
+            reset()
+        try:
+            channels = await self.twitch.fetch_channels_batch(logins)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.gql_requests_last_cycle = self._requests_last_cycle()
+            logger.warning(
+                "Batch-Poll fehlgeschlagen (%d Streamer), nutze letzten Cache: %s",
+                len(logins),
+                exc,
+            )
+            return False
+        self.gql_requests_last_cycle = self._requests_last_cycle()
+        for login, channel in channels.items():
+            self.channel_cache[login] = channel
+            self.clips_cache[login] = list(channel.clips)
+        self.cache_updated_at = time.monotonic()
+        self.cache_version += 1
+        return True
+
+    async def _ensure_cache(self) -> None:
+        """Lädt den Cache einmalig nach, wenn er älter als 3 Poll-Intervalle ist."""
+        if not self._cache_is_stale():
+            return
+        interval = max(1.0, float(self.config.live_poll_s))
+        if time.monotonic() - self._last_refresh_attempt < interval:
+            return
+        async with self._cache_lock:
+            if not self._cache_is_stale():
+                return
+            if time.monotonic() - self._last_refresh_attempt < interval:
+                return
+            self._last_refresh_attempt = time.monotonic()
+            logins = await self._load_enabled_logins()
+            self.enabled_logins = logins
+            await self._refresh_cache(logins)
+
+    def _cache_is_stale(self) -> bool:
+        if not self.channel_cache:
+            return True
+        interval = max(1.0, float(self.config.live_poll_s)) * CACHE_STALE_FACTOR
+        return time.monotonic() - self.cache_updated_at > interval
+
+    async def _load_enabled_logins(self) -> list[str]:
+        async with get_sessionmaker()() as session:
+            rows = list((await session.execute(select(Streamer))).scalars())
+        self.total_streamers = len(rows)
+        return [row.login for row in rows if row.enabled]
+
+    def _requests_last_cycle(self) -> int:
+        value = getattr(self.twitch, "gql_requests_last_cycle", None)
+        if value is None:
+            value = getattr(self.twitch, "requests_last_cycle", 0)
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    async def cached_channel(self, login: str) -> Channel | None:
+        """Kanal aus dem zentralen Poll-Cache (ohne eigenen Twitch-Request)."""
+        await self._ensure_cache()
+        return self.channel_cache.get(login.strip().lower())
+
+    async def cached_clips(self, login: str) -> list[Clip]:
+        """Clips aus dem zentralen Poll-Cache (ohne eigenen Twitch-Request)."""
+        await self._ensure_cache()
+        return list(self.clips_cache.get(login.strip().lower(), []))
+
+    def _active_session_count(self) -> int:
+        return sum(
+            1 for state in self.states.values() if state.state in ("connecting", "live")
+        )
+
+    def _refresh_queue_positions(self) -> None:
+        queued = sorted(
+            (state for state in self.states.values() if state.state == "queued"),
+            key=lambda state: state.streamer_id,
+        )
+        for position, state in enumerate(queued):
+            state.queue_position = position
+        for state in self.states.values():
+            if state.state != "queued":
+                state.queue_position = None
 
     async def kick(self) -> None:
         """Sofortigen Reconcile anstoßen (nach UI-Änderungen)."""
@@ -660,9 +844,9 @@ class Supervisor:
             )
             state.login = streamer.login
             try:
-                channel = await self.twitch.fetch_channel(streamer.login)
+                channel = await self.cached_channel(streamer.login)
                 state.last_error = None
-                if not channel.is_live:
+                if channel is None or not channel.is_live:
                     state.state = "offline"
                     state.viewers = 0
                     await self._set_last_error(streamer_id, None)
@@ -673,12 +857,39 @@ class Supervisor:
                     backoff = 5.0
                     continue
 
+                settings = await self.settings_service.get()
+                limit = capacity.max_concurrent_streams(settings)
+
+                # Admission Control: Slot und Speicher-Guard. Der Zustandswechsel
+                # passiert ohne await nach der Prüfung, damit zwei Tasks nicht
+                # gleichzeitig denselben freien Slot belegen.
+                if self._active_session_count() >= limit:
+                    state.state = "queued"
+                    state.queue_position = None
+                    self._refresh_queue_positions()
+                    logger.debug(
+                        "Kein freier Slot für %s (%d/%d belegt) – eingereiht",
+                        streamer.login,
+                        self._active_session_count(),
+                        limit,
+                    )
+                    return
+
+                guard_reason = capacity.memory_guard_reason()
+                if guard_reason:
+                    state.state = "queued"
+                    state.last_error = guard_reason
+                    self._refresh_queue_positions()
+                    logger.warning("Aufnahme %s zurückgestellt: %s", streamer.login, guard_reason)
+                    return
+
                 state.state = "connecting"
+                state.queue_position = None
                 state.viewers = channel.viewers
                 state.stream_started_at = channel.started_at
                 await self._touch_live(streamer_id, clear_error=True)
                 stream_id = channel.stream_id or f"live-{int(utcnow().timestamp())}"
-                session = LiveSession(self, streamer, str(stream_id), await self.settings_service.get(force=True))
+                session = LiveSession(self, streamer, str(stream_id), settings)
                 self.sessions[streamer_id] = session
                 try:
                     await session.run()

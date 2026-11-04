@@ -37,6 +37,9 @@ POST_ROLL_MIN = 10
 POST_ROLL_MAX = 300
 #: Das Trigger-Fenster muss vollständig in den Ringpuffer passen.
 WINDOW_MAX_S = 360
+#: Gleichzeitige Live-Aufnahmen (streamlink+ffmpeg-Paare).
+MAX_CONCURRENT_MIN = 1
+MAX_CONCURRENT_MAX = 200
 
 #: Schlüssel, die im UI/API geändert werden dürfen.
 EDITABLE_KEYS = {
@@ -50,6 +53,7 @@ EDITABLE_KEYS = {
     "max_gb_per_streamer",
     "weights",
     "audio_enabled",
+    "max_concurrent_streams",
 }
 
 
@@ -70,6 +74,7 @@ def default_values(config: AppConfig | None = None) -> dict[str, Any]:
         "max_gb_per_streamer": 50,
         "weights": dict(DEFAULT_WEIGHTS),
         "audio_enabled": False,
+        "max_concurrent_streams": 40,
     }
 
 
@@ -180,6 +185,13 @@ async def validate_updates(
         clean["quality"] = quality
     if "audio_enabled" in payload:
         clean["audio_enabled"] = bool(payload["audio_enabled"])
+    if "max_concurrent_streams" in payload:
+        clean["max_concurrent_streams"] = _as_int(
+            payload["max_concurrent_streams"],
+            "Maximal gleichzeitige Streams",
+            MAX_CONCURRENT_MIN,
+            MAX_CONCURRENT_MAX,
+        )
     if "weights" in payload:
         raw_weights = payload["weights"]
         if not isinstance(raw_weights, dict):

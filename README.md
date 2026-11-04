@@ -140,8 +140,8 @@ Nach einem Trigger:
 {STORAGE_ROOT}/{login}/{YYYY-MM-DD}/{HHMMSS}_{score100}_{recording_id}.jpg
 ```
 
-`HHMMSS` ist der UTC-Beginn des Aufnahmefensters, `score100` der Score als
-dreistellige Prozentzahl (z. B. `087`). Das Video wird ohne Neukodierung
+`HHMMSS` ist der UTC-Triggerzeitpunkt (nicht der Fensterbeginn), `score100` der
+Score als dreistellige Prozentzahl (z. B. `087`). Das Video wird ohne Neukodierung
 zusammengebaut (`-c copy -movflags +faststart`), das Thumbnail bei 20 % der
 Laufzeit erzeugt.
 
@@ -211,6 +211,8 @@ zeigt zusätzlich freien und gesamten Platz.
 
 **Retention:** stündlich werden Aufnahmen älter als `retention_days` sowie
 Überschreitungen der Quota je Streamer gelöscht (MP4, JSON, JPG und DB-Zeile).
+Das gilt auch für `failed`-Aufnahmen; hängengebliebene `pending`/`assembling`
+werden nach 24 Stunden entfernt, verwaiste `*.part.mp4` nach 6 Stunden.
 Verwaiste Pufferordner werden nach 6 Stunden entfernt, Logs nach 14 Tagen,
 Signalproben nach 2 Tagen.
 
@@ -304,8 +306,12 @@ Streamers bleiben Aufnahmen erhalten (`recording.streamer_id` wird `NULL`,
 
 - `restart: unless-stopped`, Healthcheck alle 20 s gegen `/api/health`.
 - Ein Supervisor-Task je Streamer mit exponentiellem Backoff (5 s … 300 s).
+- Der Segmentindex wird inkrementell ab dem letzten Byte-Offset gelesen;
+  ffmpeg rotiert `index.csv` über `-segment_list_size` auf 400 Einträge.
+  Der Recorder-Zustand folgt dem Pufferfenster, damit weder Speicher noch
+  Tick-Laufzeit mit der Sessiondauer wachsen.
 - streamlink und ffmpeg laufen als Kindprozesse; bei SIGTERM werden sie beendet,
-  laufende Zusammenbauten markiert und der Puffer aufgeräumt.
+  laufende Zusammenbauten markiert, `*.part.mp4` entfernt und der Puffer aufgeräumt.
 - Watchdog: Liefert die Aufnahme 90 s keine neuen Segmente, wird die Session
   beendet und neu gestartet (z. B. nach Twitch-Aussetzern).
 - Disk-Guard: unter 2 GB frei startet keine neue Aufnahme; unter 1 GB wird die
@@ -389,7 +395,8 @@ docker compose exec clipper streamlink --stdout twitch.tv/<login> 720p60,best | 
 
 **Aufnahme ist nicht exakt 300 s**
 Das ist erwartet: Randsegmente werden ganz genommen (2-s-Raster), daher
-300 s ± 2 s. Die Abnahme toleriert ±10 s.
+300 s ± Segmentlänge; durch MP4-Priming/Audio-Padding können praktisch bis zu
+ca. 3 s dazukommen. Die Abnahme toleriert ±10 s.
 
 **Thumbnail fehlt**
 Die Datei wird bei 20 % der Laufzeit erzeugt. Bei sehr kurzen/truncated

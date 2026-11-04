@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 GQL_URL = "https://gql.twitch.tv/gql"
 PUBLIC_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 
+#: Maximal so viele Logins stecken in einem Batch-POST (Twitch-GQL-Aliaslimit).
+BATCH_CHUNK_SIZE = 20
+
 CHANNEL_QUERY = """
 query Channel($login: String!) {
   user(login: $login) {
@@ -69,6 +72,40 @@ query TopStreams($first: Int!) {
 }
 """.strip()
 
+#: Eine Kanalabfrage, wie sie im Batch je Alias verwendet wird.
+_CHANNEL_FIELDS = """
+    id
+    login
+    displayName
+    stream {
+      id
+      viewersCount
+      createdAt
+      game { name }
+    }
+    clips(first: 10, criteria: {period: LAST_DAY}) {
+      edges {
+        node { id title createdAt durationSeconds viewCount }
+      }
+    }
+""".strip()
+
+
+def build_batch_query(count: int) -> str:
+    """Baut eine GQL-Anfrage mit ``count`` Aliasen (``a0``..``aN``)."""
+    total = max(0, count)
+    declarations = ", ".join(f"$l{index}: String!" for index in range(total))
+    aliases = [
+        f"  a{index}: user(login: $l{index}) {{\n{_CHANNEL_FIELDS}\n  }}"
+        for index in range(total)
+    ]
+    return f"query BatchChannels({declarations}) {{\n" + "\n".join(aliases) + "\n}"
+
+
+def chunk_logins(logins: list[str], size: int = BATCH_CHUNK_SIZE) -> list[list[str]]:
+    size = max(1, int(size))
+    return [logins[index : index + size] for index in range(0, len(logins), size)]
+
 
 class GQLClient:
     def __init__(
@@ -81,6 +118,12 @@ class GQLClient:
         self._timeout = timeout
         self._owns_client = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=timeout)
+        #: Anzahl der in diesem Poll-Zyklus abgesetzten POSTs (für /api/capacity).
+        self.requests_last_cycle = 0
+
+    def begin_cycle(self) -> None:
+        """Setzt den Request-Zähler zu Beginn eines Poll-Zyklus zurück."""
+        self.requests_last_cycle = 0
 
     async def close(self) -> None:
         if self._owns_client:
@@ -96,6 +139,7 @@ class GQLClient:
         last_error: Exception | None = None
         for attempt in range(4):
             try:
+                self.requests_last_cycle += 1
                 response = await self._http.post(GQL_URL, json=payload, headers=headers)
                 if response.status_code in (429, 500, 502, 503, 504):
                     raise TwitchUnavailable(f"Twitch GQL HTTP {response.status_code}")
@@ -115,14 +159,10 @@ class GQLClient:
                 await asyncio.sleep(delay)
         raise TwitchUnavailable(f"Twitch nicht erreichbar: {last_error}") from last_error
 
-    async def fetch_channel(self, login: str) -> Channel:
-        login = login.strip().lower()
-        data = await self._post(CHANNEL_QUERY, {"login": login})
-        user = data.get("user")
-        if not user:
-            raise UserNotFound(f"Twitch-Kanal '{login}' wurde nicht gefunden.")
+    @classmethod
+    def _channel_from_user(cls, user: dict[str, Any], login: str) -> Channel:
         stream = user.get("stream") or {}
-        clips = self._parse_clips((user.get("clips") or {}).get("edges") or [])
+        clips = cls._parse_clips((user.get("clips") or {}).get("edges") or [])
         return Channel(
             id=str(user.get("id") or ""),
             login=str(user.get("login") or login).lower(),
@@ -134,6 +174,53 @@ class GQLClient:
             stream_id=str(stream.get("id")) if stream and stream.get("id") else None,
             clips=clips,
         )
+
+    async def fetch_channel(self, login: str) -> Channel:
+        login = login.strip().lower()
+        data = await self._post(CHANNEL_QUERY, {"login": login})
+        user = data.get("user")
+        if not user:
+            raise UserNotFound(f"Twitch-Kanal '{login}' wurde nicht gefunden.")
+        return self._channel_from_user(user, login)
+
+    async def fetch_channels_batch(self, logins: list[str]) -> dict[str, Channel]:
+        """Holt bis zu 20 Kanäle pro POST über GQL-Aliase.
+
+        Unbekannte Logins (``user: null``) fehlen im Ergebnis, ohne den
+        restlichen Batch zu verwerfen. Fällt ein Chunk komplett aus, werden
+        die übrigen Chunks trotzdem genutzt; erst wenn kein einziger Login
+        ein Ergebnis liefert, wird der Fehler weitergereicht.
+        """
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in logins:
+            login = str(raw or "").strip().lower()
+            if not login or login in seen:
+                continue
+            seen.add(login)
+            normalized.append(login)
+        if not normalized:
+            return {}
+
+        channels: dict[str, Channel] = {}
+        errors: list[Exception] = []
+        for chunk in chunk_logins(normalized):
+            variables = {f"l{index}": login for index, login in enumerate(chunk)}
+            try:
+                data = await self._post(build_batch_query(len(chunk)), variables)
+            except TwitchError as exc:
+                errors.append(exc)
+                logger.warning("Batch-Poll für %d Kanal/Kanäle fehlgeschlagen: %s", len(chunk), exc)
+                continue
+            for index, login in enumerate(chunk):
+                user = data.get(f"a{index}")
+                if not user:
+                    logger.debug("Twitch-Kanal '%s' im Batch nicht gefunden", login)
+                    continue
+                channels[login] = self._channel_from_user(user, login)
+        if errors and not channels:
+            raise errors[-1]
+        return channels
 
     async def fetch_clips(self, login: str) -> list[Clip]:
         data = await self._post(CLIPS_QUERY, {"login": login.strip().lower()})

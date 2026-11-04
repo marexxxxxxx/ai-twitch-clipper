@@ -89,3 +89,25 @@ async def test_validate_updates_normalizes_weights() -> None:
     clean = await validate_updates({"weights": {"chat_rate": 0.5}})
     assert clean["weights"]["chat_rate"] == 0.5
     assert clean["weights"]["clip_created"] == 0.30
+
+
+@pytest.mark.asyncio
+async def test_check_path_rejects_nul_byte() -> None:
+    with pytest.raises(StorageError, match="NUL"):
+        await check_path("/tmp/\x00boese")
+    with pytest.raises(SettingsValidationError):
+        await validate_updates({"storage_root": "/tmp/\x00boese"})
+
+
+def test_settings_api_returns_400_for_nul_path() -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import settings as settings_api
+
+    app = FastAPI()
+    app.include_router(settings_api.router)
+    with TestClient(app) as client:
+        response = client.post("/api/settings/check-path", json={"path": "/tmp/\x00boese"})
+    assert response.status_code == 400
+    assert "NUL" in response.json()["detail"]

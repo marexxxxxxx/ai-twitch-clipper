@@ -148,6 +148,12 @@ class Detector:
             self.triggers += 1
         return decision
 
+    def mark_triggered(self, now: datetime | None = None) -> None:
+        """Setzt den Cooldown auch für manuell ausgelöste Aufnahmen."""
+        self.last_trigger_at = now or utcnow()
+        self.consecutive = 0
+        self.triggers += 1
+
     def cooldown_remaining(self, now: datetime | None = None) -> float:
         now = now or utcnow()
         if self.last_trigger_at is None:

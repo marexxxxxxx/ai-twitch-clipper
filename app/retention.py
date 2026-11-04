@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Protocol
@@ -19,8 +21,11 @@ logger = logging.getLogger(__name__)
 
 GB = 1024**3
 ACTIVE_STATUSES = ("ready", "truncated")
+EXPIRABLE_STATUSES = ("ready", "truncated", "failed")
 #: Status, die beim nächsten Start nicht weitergeführt werden können.
 INTERRUPTED_STATUSES = ("pending", "assembling")
+STALE_UNFINISHED_HOURS = 24
+ORPHAN_PART_HOURS = 6
 RECONCILE_ERROR = "Beim Neustart abgebrochen"
 
 
@@ -34,12 +39,51 @@ class RetentionRecord(Protocol):
 
 
 def select_expired(records: Iterable[RetentionRecord], now: datetime, retention_days: int) -> list[RetentionRecord]:
+    """Abgelaufene fertige und fehlgeschlagene Aufnahmen.
+
+    ``failed`` wird mit derselben Frist aufgeräumt, damit abgebrochene
+    Zusammenbauten nicht dauerhaft in Liste und Platte bleiben.
+    """
     cutoff = now - timedelta(days=max(1, int(retention_days)))
     return [
         record
         for record in records
-        if record.status in ACTIVE_STATUSES and (record.started_at or record.created_at) < cutoff
+        if record.status in EXPIRABLE_STATUSES and (record.started_at or record.created_at) < cutoff
     ]
+
+
+def select_stale_unfinished(
+    records: Iterable[RetentionRecord], now: datetime, max_age_hours: int = STALE_UNFINISHED_HOURS
+) -> list[RetentionRecord]:
+    """Hängengebliebene ``pending``/``assembling``-Zeilen (z. B. nach Crash)."""
+    cutoff = now - timedelta(hours=max(1, int(max_age_hours)))
+    return [
+        record
+        for record in records
+        if record.status in INTERRUPTED_STATUSES and record.created_at < cutoff
+    ]
+
+
+def find_orphan_parts(storage_root: Path | str, older_than_s: float = ORPHAN_PART_HOURS * 3600) -> list[Path]:
+    """Findet ``*.part.mp4``-Reste ohne zugehörige aktive Aufnahme."""
+    root = Path(storage_root)
+    if not root.exists():
+        return []
+    cutoff = time.time() - older_than_s
+    orphans: list[Path] = []
+    for directory, _dirs, files in os.walk(root):
+        if "_buffer" in Path(directory).parts:
+            continue
+        for name in files:
+            if not name.endswith(".part.mp4"):
+                continue
+            candidate = Path(directory) / name
+            try:
+                if candidate.stat().st_mtime < cutoff:
+                    orphans.append(candidate)
+            except OSError:
+                continue
+    return orphans
 
 
 def select_over_quota(records: Iterable[RetentionRecord], max_bytes: int) -> list[RetentionRecord]:
@@ -133,20 +177,26 @@ async def run_retention_once(settings: dict[str, Any], active_buffer_dirs: set[P
     max_bytes = int(float(settings.get("max_gb_per_streamer") or 50) * GB)
     storage_root = Path(str(settings.get("storage_root") or "/data"))
     now = utcnow()
-    stats = {"expired": 0, "quota": 0, "signals": 0, "logs": 0, "buffers": 0}
+    stats = {"expired": 0, "quota": 0, "stale": 0, "parts": 0, "signals": 0, "logs": 0, "buffers": 0}
 
     async with get_sessionmaker()() as session:
         rows = list((await session.execute(select(Recording))).scalars())
         expired = select_expired(rows, now, retention_days)
+        stale = select_stale_unfinished(rows, now)
         expired_ids = {record.id for record in expired}
-        remaining = [record for record in rows if record.id not in expired_ids]
+        stale_ids = {record.id for record in stale}
+        remaining = [
+            record for record in rows if record.id not in expired_ids and record.id not in stale_ids
+        ]
         quota = select_over_quota(remaining, max_bytes)
 
-        for record in {record.id: record for record in [*expired, *quota]}.values():
+        for record in {record.id: record for record in [*expired, *stale, *quota]}.values():
             delete_recording_files(record)
             await session.delete(record)
             if record.id in expired_ids:
                 stats["expired"] += 1
+            elif record.id in stale_ids:
+                stats["stale"] += 1
             else:
                 stats["quota"] += 1
 
@@ -159,6 +209,14 @@ async def run_retention_once(settings: dict[str, Any], active_buffer_dirs: set[P
         stats["logs"] = result.rowcount or 0
 
         await session.commit()
+
+    # Verwaiste *.part.mp4-Reste (abgebrochener Zusammenbau, Crash).
+    for part in find_orphan_parts(storage_root):
+        try:
+            part.unlink(missing_ok=True)
+            stats["parts"] += 1
+        except OSError as exc:
+            logger.warning("Teil-Datei %s konnte nicht gelöscht werden: %s", part, exc)
 
     # Verwaiste Pufferordner (älter als 6 h, nicht von einer aktiven Session genutzt).
     buffer_root = storage_root / "_buffer"

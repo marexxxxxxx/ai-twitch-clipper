@@ -119,8 +119,14 @@ class RingBuffer:
             path=str(self.directory),
         )
 
-    async def prune(self, segments: list[Segment], media_end: float, keep_s: float | None = None) -> int:
-        """Löscht alte Segmente; gibt die Anzahl gelöschter Dateien zurück."""
+    async def prune(
+        self, segments: list[Segment], media_end: float, keep_s: float | None = None
+    ) -> list[Segment]:
+        """Löscht alte Segmente und gibt die entfernten Segmente zurück.
+
+        Der Aufrufer entfernt sie anschließend aus dem Recorder-Zustand, damit
+        weder Segmentliste noch CSV-Auswertung über die Session hinaus wachsen.
+        """
         async with self._prune_lock:
             candidates = prune_candidates(
                 segments,
@@ -128,15 +134,15 @@ class RingBuffer:
                 keep_s=self.keep_s if keep_s is None else float(keep_s),
                 protected_window=self._protected,
             )
-            removed = 0
+            removed: list[Segment] = []
             for segment in candidates:
                 try:
                     segment.path.unlink(missing_ok=True)
-                    removed += 1
+                    removed.append(segment)
                 except OSError as exc:
                     logger.warning("Segment %s konnte nicht gelöscht werden: %s", segment.path, exc)
             if removed:
-                logger.debug("%d alte Segmente aus %s entfernt", removed, self.directory)
+                logger.debug("%d alte Segmente aus %s entfernt", len(removed), self.directory)
             return removed
 
     async def clear(self) -> None:
