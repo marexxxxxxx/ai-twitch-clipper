@@ -22,12 +22,12 @@ from .clip.assembler import ClipAssembler
 from .config import AppConfig, get_config
 from .db import get_sessionmaker
 from .detect.detector import Detector, TriggerDecision
-from .detect.signals import SessionSignals, sanitize_weights
+from .detect.signals import MODE_SETTLE_S, SessionSignals, sanitize_weights
 from .logging_setup import log_hub
 from .models import Recording, SignalSample, Streamer
 from .runtime_settings import SettingsService, storage_path
 from .timeutil import iso, utcnow
-from .twitch.chat import ChatMessage, ChatReader
+from .twitch.chat import ChatMessage, ChatMode, ChatReader
 from .twitch.client import TwitchClient
 from .twitch.gql import CLIP_BATCH_SIZE, chunk_logins
 from .twitch.types import Channel, Clip, UserNotFound
@@ -67,6 +67,8 @@ class RuntimeState:
     last_tick_at: datetime | None = None
     last_error: str | None = None
     chat_connected: bool = False
+    chat_mode: str = ""
+    signals_suppressed_s: float = 0.0
     cooldown_remaining_s: float = 0.0
     session_started_at: datetime | None = None
     stream_id: str | None = None
@@ -87,6 +89,8 @@ class RuntimeState:
             "last_tick_at": iso(self.last_tick_at),
             "last_error": self.last_error,
             "chat_connected": self.chat_connected,
+            "chat_mode": self.chat_mode,
+            "signals_suppressed_s": round(self.signals_suppressed_s, 1),
             "cooldown_remaining_s": round(self.cooldown_remaining_s, 1),
             "session_started_at": iso(self.session_started_at),
             "stream_id": self.stream_id,
@@ -182,7 +186,7 @@ class LiveSession:
             self.buffer_dir,
         )
 
-        self.chat = ChatReader(self.streamer.login, self._on_chat)
+        self.chat = ChatReader(self.streamer.login, self._on_chat, on_mode=self._on_mode)
         self.chat.start()
         self._tasks = [
             asyncio.create_task(self._tick_loop(), name=f"tick:{self.streamer.login}"),
@@ -247,6 +251,20 @@ class LiveSession:
     def _on_chat(self, message: ChatMessage) -> None:
         self.signals.on_chat(message)
 
+    def _on_mode(self, mode: ChatMode) -> None:
+        now = utcnow()
+        self.signals.note_mode(mode, now)
+        self.runtime.chat_mode = mode.label
+        self.runtime.signals_suppressed_s = self._mode_suppression(now)
+
+    def _mode_suppression(self, now: datetime) -> float:
+        """Restzeit des 120-s-Settles nach einem Moduswechsel (0 = vorbei)."""
+        changed_at = self.signals.mode_changed_at
+        if changed_at is None:
+            return 0.0
+        remaining = MODE_SETTLE_S - (now - changed_at).total_seconds()
+        return max(0.0, float(remaining))
+
     async def _tick_loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -287,6 +305,7 @@ class LiveSession:
         self.runtime.last_tick_at = now
         self.runtime.cooldown_remaining_s = self.detector.cooldown_remaining(now)
         self.runtime.chat_connected = bool(self.chat and self.chat.connected)
+        self.runtime.signals_suppressed_s = self._mode_suppression(now)
 
         await self._save_signal(now, decision.score, components)
 
@@ -457,6 +476,7 @@ class LiveSession:
                 "media_trigger_s": round(media_trigger, 3),
                 "stream_id": self.stream_id,
                 "session_started_at": iso(self.recorder.started_at),
+                "chat_mode": self.runtime.chat_mode,
             }
 
             async with get_sessionmaker()() as session:

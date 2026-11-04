@@ -95,6 +95,20 @@ Alle Signale werden pro Stream-Session in 5-s-Buckets geführt; Historie 15 min.
 4. **Viewer-Delta** (`viewers`): zentraler GraphQL-Poll alle 30 s. Relative Änderung
    über 120 s; Score = `clamp(delta/0.10, 0, 1)`, nur positiv.
 
+**Chat-Modi:** Twitch sendet beim JOIN und bei jeder Änderung ein `ROOMSTATE`-Event
+(`subs-only`, `emote-only`, `followers-only`, `slow`). Der Chat-Reader parst es und
+meldet den Modus an die Session. Bei einem echten Wechsel werden die bisherigen
+5-s-Buckets verworfen und `chat_rate`/`emote_burst` für **120 s** (Settle)
+auf 0 gehalten – der Übergang kann keinen Trigger auslösen. Anschließend wird der
+Median nur aus Buckets der neuen Phase gebildet; fehlende Buckets innerhalb der
+Phase zählen als 0, aber erst ab 12 vergangenen Buckets. Der erste Modus einer
+Session ist kein Wechsel und setzt keinen Settle. `viewers`, `clip_created` und
+`clip_burst` bleiben unverändert. Der aktive Modus wird im Dashboard
+(„Chat: verbunden · Sub-only“) und auf der Streamer-Seite angezeigt. In Sub-only
+ist die absolute Chatmenge kleiner; die Erkennung bleibt relativ zum Kanal-Median,
+eine automatische Schwellenanpassung gibt es nicht (Schwelle manuell unter
+`/settings`).
+
 **Ein zentraler Poll:** Live-Status und Viewer kommen aus demselben 30-s-Batch
 (`live_poll_s`). Der frühere separate 20-s-Viewer-Poll entfiel, weil Twitch pro
 Anfrage maximal 15 Root-Field-Aliase erlaubt und ein zweiter Poll das

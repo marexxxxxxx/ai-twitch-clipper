@@ -47,6 +47,42 @@ class ChatMessage:
     hype_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class ChatMode:
+    """Chat-Restriktionen aus einem ``ROOMSTATE``-Event.
+
+    ``followers_only`` ist in Minuten angegeben: ``-1`` = aus, ``0`` = alle
+    Follower (jeder darf schreiben), ``>0`` = Mindest-Follow-Dauer.
+    ``slow`` ist die Slow-Mode-Pause in Sekunden (``0`` = aus).
+    """
+
+    subs_only: bool = False
+    emote_only: bool = False
+    followers_only: int = -1
+    slow: int = 0
+
+    @property
+    def restricted(self) -> bool:
+        return self.subs_only or self.emote_only or self.followers_only >= 0 or self.slow > 0
+
+    @property
+    def label(self) -> str:
+        parts: list[str] = []
+        if self.subs_only:
+            parts.append("Sub-only")
+        if self.emote_only:
+            parts.append("Emote-only")
+        if self.followers_only >= 0:
+            parts.append(
+                "Followers-only"
+                if self.followers_only == 0
+                else f"Followers-only {self.followers_only} min"
+            )
+        if self.slow > 0:
+            parts.append(f"Slow {self.slow} s")
+        return " · ".join(parts)
+
+
 def random_nick() -> str:
     suffix = "".join(random.choices(string.digits, k=8))
     return f"justinfan{suffix}"
@@ -122,6 +158,30 @@ def parse_privmsg(line: str) -> ChatMessage | None:
     )
 
 
+_ROOMSTATE_RE = re.compile(r"^@(?P<tags>\S+) :tmi\.twitch\.tv ROOMSTATE #", re.IGNORECASE)
+
+
+def parse_roomstate(line: str) -> ChatMode | None:
+    """Parst ein ``ROOMSTATE``-Event. Fehlende Tags gelten als Defaults."""
+    match = _ROOMSTATE_RE.match(line)
+    if match is None:
+        return None
+    tags = _parse_tags(match.group("tags"))
+
+    def _int(name: str, default: int) -> int:
+        try:
+            return int(tags.get(name, ""))
+        except (TypeError, ValueError):
+            return default
+
+    return ChatMode(
+        subs_only=tags.get("subs-only") == "1",
+        emote_only=tags.get("emote-only") == "1",
+        followers_only=_int("followers-only", -1),
+        slow=_int("slow", 0),
+    )
+
+
 class ChatReader:
     """Verbindet sich anonym mit dem Chat eines Kanals und liefert Nachrichten.
 
@@ -129,12 +189,30 @@ class ChatReader:
     geloggt, aber nicht nach außen geworfen.
     """
 
-    def __init__(self, login: str, on_message: Callable[[ChatMessage], None]) -> None:
+    def __init__(
+        self,
+        login: str,
+        on_message: Callable[[ChatMessage], None],
+        on_mode: Callable[[ChatMode], None] | None = None,
+    ) -> None:
         self.login = login.strip().lower()
         self.on_message = on_message
+        self.on_mode = on_mode
+        self.mode: ChatMode | None = None
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self.connected = False
+
+    def _apply_mode(self, mode: ChatMode) -> None:
+        """Setzt den Modus; der Callback feuert nur bei einer Änderung."""
+        if mode == self.mode:
+            return
+        self.mode = mode
+        if self.on_mode is not None:
+            try:
+                self.on_mode(mode)
+            except Exception:  # noqa: BLE001
+                logger.exception("Chat-Modus-Callback fehlgeschlagen")
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -176,6 +254,14 @@ class ChatReader:
                                 continue
                             if line.startswith("PING"):
                                 await ws.send("PONG :tmi.twitch.tv")
+                                continue
+                            try:
+                                mode = parse_roomstate(line)
+                            except Exception:  # noqa: BLE001 - eine kaputte Zeile darf den Chat nicht töten
+                                logger.debug("ROOMSTATE nicht parsebar: %s", line[:200])
+                                mode = None
+                            if mode is not None:
+                                self._apply_mode(mode)
                                 continue
                             try:
                                 message = parse_privmsg(line)

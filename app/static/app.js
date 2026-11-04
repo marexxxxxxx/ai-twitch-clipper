@@ -123,7 +123,9 @@ function streamerCard(item) {
   if (item.last_error) {
     note = `<span class="error-text">${escapeHtml(item.last_error)}</span>`;
   } else if (state === "live") {
-    note = `Chat: ${item.chat_connected ? "verbunden" : "nicht verbunden"} · Cooldown ${Math.round(item.cooldown_remaining_s || 0)} s`;
+    const mode = item.chat_mode ? ` · ${item.chat_mode}` : "";
+    const suppressed = Number(item.signals_suppressed_s) > 0 ? " · Signale setzen aus (Übergang)" : "";
+    note = `Chat: ${item.chat_connected ? "verbunden" : "nicht verbunden"}${mode}${suppressed} · Cooldown ${Math.round(item.cooldown_remaining_s || 0)} s`;
   } else if (state === "queued") {
     note = "live, wartet auf freien Slot";
   } else {

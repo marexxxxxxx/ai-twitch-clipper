@@ -167,6 +167,18 @@ Alle Signale werden pro Aufnahme-Session in **5-Sekunden-Buckets** geführt, mit
 | `viewers` | zentraler GraphQL-Poll alle 30 s | relative Änderung über 120 s: `clamp(delta / 0.10, 0, 1)`, nur positiv |
 | `audio` | optional | in dieser Version **nicht aktiv** (siehe Abweichungen) |
 
+**Chat-Modi (`ROOMSTATE`):** Der Chat-Reader wertet die `ROOMSTATE`-Events von
+Twitch aus (`subs-only`, `emote-only`, `followers-only`, `slow`). Bei einem
+Moduswechsel werden die bisherigen 5-s-Buckets verworfen und Chat- sowie
+Emote-Signal für **120 s** ausgesetzt (Settle), damit der Übergang keinen
+Trigger auslöst. Danach wird der Median ausschließlich aus Buckets der neuen
+Phase gebildet; fehlende Buckets zählen erst ab 12 vergangenen Buckets als
+Stille. Der aktive Modus erscheint im Dashboard und auf der Streamer-Seite
+(z. B. „Chat: verbunden · Sub-only“). Ehrlich eingeordnet: In Sub-only ist die
+absolute Chatmenge kleiner, die Erkennung bleibt relativ zum Kanal-Median. Es
+gibt **keine automatische Schwellenanpassung** – die Schwelle kann unter
+`/settings` manuell gesenkt werden.
+
 **Ein zentraler Poll:** Live-Status und Viewer kommen aus demselben Batch-Poll
 alle 30 s (`live_poll_s`). Der frühere separate 20-s-Viewer-Poll entfiel, weil
 Twitch pro Anfrage maximal 15 Root-Field-Aliase erlaubt und ein zweiter Poll

@@ -120,7 +120,7 @@
       <svg class="sparkline" viewBox="0 0 240 44" preserveAspectRatio="none" aria-label="Score der letzten 15 Minuten"></svg>
       <p class="card-note js-note">
         {% if s.last_error %}<span class="error-text">{{ s.last_error }}</span>
-        {% elif s.state == 'live' %}Chat: {{ 'verbunden' if s.chat_connected else 'nicht verbunden' }} · Cooldown {{ s.cooldown_remaining_s | round(0) | int }} s
+        {% elif s.state == 'live' %}Chat: {{ 'verbunden' if s.chat_connected else 'nicht verbunden' }}{% if s.chat_mode %} · {{ s.chat_mode }}{% endif %}{% if s.signals_suppressed_s > 0 %} · Signale setzen aus (Übergang){% endif %} · Cooldown {{ s.cooldown_remaining_s | round(0) | int }} s
         {% elif s.state == 'queued' %}live, wartet auf freien Slot
         {% else %}wartet auf Live-Signal{% endif %}
       </p>

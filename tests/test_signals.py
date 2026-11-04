@@ -4,12 +4,13 @@ from datetime import datetime, timedelta, timezone
 
 from app.detect.signals import (
     BUCKET_S,
+    MODE_SETTLE_S,
     SessionSignals,
     bucket_key,
     burst_score,
     viewers_score,
 )
-from app.twitch.chat import ChatMessage, parse_privmsg
+from app.twitch.chat import ChatMessage, ChatMode, parse_privmsg
 from app.twitch.types import Clip
 
 NOW = datetime(2026, 11, 4, 12, 0, 0)
@@ -123,3 +124,27 @@ def test_parse_privmsg_hype_and_text() -> None:
 def test_parse_privmsg_ignores_non_messages() -> None:
     assert parse_privmsg("PING :tmi.twitch.tv") is None
     assert parse_privmsg(":tmi.twitch.tv 001 justinfan :Welcome") is None
+
+
+def test_chat_mode_change_clears_basis_and_settles() -> None:
+    started = NOW - timedelta(minutes=10)
+    signals = SessionSignals(started_at=started)
+    signals.note_mode(ChatMode(), started)
+    current = bucket_key(started)
+    while current <= int(epoch(NOW - timedelta(seconds=65))):
+        for offset in (0.5, 1.5):
+            signals.on_chat(message(at(current + offset)))
+        current += BUCKET_S
+
+    # Sub-only an: alte offene Historie wird verworfen, Signale setzen 120 s aus.
+    signals.note_mode(ChatMode(subs_only=True), NOW)
+    assert signals.mode_changed_at == NOW
+    assert signals.buckets == {}
+    assert signals.chat_rate_signal(NOW + timedelta(seconds=MODE_SETTLE_S - 1)).score == 0.0
+    assert signals.emote_signal(NOW + timedelta(seconds=MODE_SETTLE_S - 1)).score == 0.0
+
+    # Erster Modus einer Session ist kein Übergang.
+    fresh = SessionSignals(started_at=started)
+    fresh.note_mode(ChatMode(), NOW)
+    assert fresh.mode_changed_at is None
+

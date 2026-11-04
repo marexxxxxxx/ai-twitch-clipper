@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from ..timeutil import utcnow
-from ..twitch.chat import ChatMessage
+from ..twitch.chat import ChatMessage, ChatMode
 from ..twitch.types import Clip
 
 BUCKET_S = 5
@@ -17,6 +17,11 @@ MIN_HISTORY_S = 300
 RECENT_EXCLUDE_S = 60
 CLIP_WINDOW_S = 180
 VIEWER_DELTA_S = 120
+#: Nach einem Moduswechsel bleiben Chat-/Emote-Signale so lange stumm, bis
+#: sich die neue Basis gefüllt hat (kein Trigger direkt am Übergang).
+MODE_SETTLE_S = 120
+#: Mindestzahl ausgewerteter 5-s-Buckets in der aktuellen Modus-Phase.
+MIN_MODE_BUCKETS = 12
 
 HYPE_EMOTES = (
     "KEKW",
@@ -98,8 +103,38 @@ class SessionSignals:
         self.recent_clips: dict[str, Clip] = {}
         self.seen_clip_ids: set[str] = set()
         self.last_clip_poll: datetime | None = None
+        self.chat_mode: ChatMode | None = None
+        self.mode_changed_at: datetime | None = None
 
     # -- Chat ---------------------------------------------------------------
+    def note_mode(self, mode: ChatMode, now: datetime | None = None) -> None:
+        """Übernimmt den Chat-Modus; bei einem echten Wechsel wird die Basis neu aufgebaut.
+
+        Der erste Modus einer Session (``None`` → gesetzt) ist kein Übergang und
+        setzt keinen Settle-Zeitpunkt – die Session startet bereits in diesem Modus.
+        """
+        now = now or utcnow()
+        if self.chat_mode is None:
+            self.chat_mode = mode
+            return
+        if self.chat_mode == mode:
+            return
+        self.chat_mode = mode
+        # Historie der alten Phase ist nicht vergleichbar (Sub-only, Slow, Emote-only).
+        self.buckets.clear()
+        self.mode_changed_at = now
+
+    def _settling(self, now: datetime) -> bool:
+        return (
+            self.mode_changed_at is not None
+            and now - self.mode_changed_at < timedelta(seconds=MODE_SETTLE_S)
+        )
+
+    def _phase_start(self) -> datetime:
+        if self.mode_changed_at is not None and self.mode_changed_at > self.started_at:
+            return self.mode_changed_at
+        return self.started_at
+
     def on_chat(self, message: ChatMessage, now: datetime | None = None) -> None:
         now = now or message.ts
         key = bucket_key(now)
@@ -191,7 +226,9 @@ class SessionSignals:
         künstlich nach oben ziehen. Rückgabe ist auf das 99. Perzentil gekappt.
         """
         end = now - timedelta(seconds=upto_offset_s)
-        start = max(self.started_at, now - timedelta(seconds=HISTORY_S))
+        # Nie Buckets vor dem letzten Moduswechsel auswerten: Sie stammen aus
+        # einer anderen Chat-Restriktion und würden den Median verfälschen.
+        start = max(self._phase_start(), now - timedelta(seconds=HISTORY_S))
         values: list[float] = []
         current = bucket_key(start)
         end_key = bucket_key(end)
@@ -220,10 +257,12 @@ class SessionSignals:
     def chat_rate_signal(self, now: datetime | None = None) -> SignalDetail:
         now = now or utcnow()
         metric = self._bucket_metric(now, "messages")
+        if self._settling(now):
+            return SignalDetail(score=0.0, metric=metric, samples=0)
         if now - self.started_at < timedelta(seconds=MIN_HISTORY_S):
             return SignalDetail(score=0.0, metric=metric, samples=0)
         values = self._window_values(now, "messages")
-        if len(values) < 12:
+        if len(values) < MIN_MODE_BUCKETS:
             return SignalDetail(score=0.0, metric=metric, samples=len(values))
         median = statistics.median(values)
         return SignalDetail(
@@ -237,10 +276,12 @@ class SessionSignals:
     def emote_signal(self, now: datetime | None = None) -> SignalDetail:
         now = now or utcnow()
         metric = self._bucket_metric(now, "emotes")
+        if self._settling(now):
+            return SignalDetail(score=0.0, metric=metric, samples=0)
         if now - self.started_at < timedelta(seconds=MIN_HISTORY_S):
             return SignalDetail(score=0.0, metric=metric, samples=0)
         values = self._window_values(now, "emotes")
-        if len(values) < 12:
+        if len(values) < MIN_MODE_BUCKETS:
             return SignalDetail(score=0.0, metric=metric, samples=len(values))
         median = statistics.median(values)
         return SignalDetail(

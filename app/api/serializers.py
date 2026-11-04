@@ -94,6 +94,8 @@ def streamer_dict(streamer: Streamer, runtime: dict[str, Any] | None = None) -> 
         "last_components": runtime.get("last_components", {}),
         "last_detail": runtime.get("last_detail", {}),
         "chat_connected": runtime.get("chat_connected", False),
+        "chat_mode": runtime.get("chat_mode", ""),
+        "signals_suppressed_s": runtime.get("signals_suppressed_s", 0.0),
         "cooldown_remaining_s": runtime.get("cooldown_remaining_s", 0.0),
         "stream_id": runtime.get("stream_id"),
         "recording_id": runtime.get("recording_id"),
