@@ -144,6 +144,18 @@ class SessionSignals:
         """Mindesthistorie wie beim Sessionstart, gerechnet ab der neuen Basis."""
         return now - self._phase_start() >= timedelta(seconds=MIN_HISTORY_S)
 
+    def suppressed_remaining(self, now: datetime | None = None) -> float:
+        """Restzeit der vollen Chat-Modus-Stummschaltung in Sekunden.
+
+        Deckt Settle **und** Basisaufbau ab, damit die UI nicht nach 120 s
+        „vorbei“ meldet, während Chat/Emote noch 5 Minuten blind sind.
+        """
+        now = now or utcnow()
+        if self.mode_changed_at is None or self._basis_ready(now):
+            return 0.0
+        end = self._phase_start() + timedelta(seconds=MIN_HISTORY_S)
+        return max(0.0, (end - now).total_seconds())
+
     def on_chat(self, message: ChatMessage, now: datetime | None = None) -> None:
         now = now or message.ts
         key = bucket_key(now)

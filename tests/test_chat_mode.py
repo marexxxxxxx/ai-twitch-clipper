@@ -249,6 +249,22 @@ def test_mode_settle_suppresses_chat_and_old_basis_is_discarded() -> None:
     assert burst.score > 0.6
 
 
+def test_suppressed_remaining_covers_settle_and_basis() -> None:
+    signals = SessionSignals(started_at=NOW - timedelta(hours=1))
+    signals.note_mode(OPEN, NOW - timedelta(hours=1))
+    signals.note_mode(SUBS_ONLY, NOW)
+
+    assert signals.suppressed_remaining(NOW) == MODE_SETTLE_S + MIN_HISTORY_S
+    assert signals.suppressed_remaining(NOW + timedelta(seconds=MODE_SETTLE_S)) == MIN_HISTORY_S
+    assert signals.suppressed_remaining(NOW + timedelta(seconds=REBUILD_S)) == 0.0
+    assert signals.suppressed_remaining(NOW + timedelta(seconds=REBUILD_S + 60)) == 0.0
+
+    # Ohne Moduswechsel gibt es nichts anzuzeigen.
+    fresh = SessionSignals(started_at=NOW - timedelta(hours=1))
+    fresh.note_mode(OPEN, NOW)
+    assert fresh.suppressed_remaining(NOW) == 0.0
+
+
 def test_emote_only_ramp_up_does_not_burst() -> None:
     started = NOW - timedelta(minutes=30)
     signals = SessionSignals(started_at=started)
@@ -330,7 +346,7 @@ class _FakeSupervisor:
             "state": "live",
             "chat_connected": True,
             "chat_mode": "Sub-only · Slow 30 s",
-            "signals_suppressed_s": 42.0,
+            "signals_suppressed_s": float(REBUILD_S),
             "viewers": 10,
             "buffer_s": 120.0,
             "last_score": 0.1,

@@ -143,6 +143,7 @@ def test_chat_mode_change_clears_basis_and_settles() -> None:
     assert signals.buckets == {}
     # Die belastbare Basis beginnt erst nach dem Settle, nicht am Wechsel.
     assert signals._phase_start() == NOW + timedelta(seconds=MODE_SETTLE_S)
+    assert signals.suppressed_remaining(NOW) == MODE_SETTLE_S + MIN_HISTORY_S
     assert signals.chat_rate_signal(NOW + timedelta(seconds=MODE_SETTLE_S - 1)).score == 0.0
     assert signals.emote_signal(NOW + timedelta(seconds=MODE_SETTLE_S - 1)).score == 0.0
     # Auch nach dem Settle fehlt noch die 5-min-Basis: kein Score (Sparse-Guard).

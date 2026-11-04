@@ -177,7 +177,9 @@ dabei immer als 0, 12 ist nur die Mindestanzahl ausgewerteter Buckets (bei zu
 wenigen Samples bleibt der Score 0). Nach voller Basis ist `median == 0` wieder
 ein legitimes Signal (ruhiger Chat + plötzlicher Burst). Der aktive Modus
 erscheint im Dashboard und auf der Streamer-Seite (z. B. „Chat: verbunden ·
-Sub-only“). Ehrlich eingeordnet: In Sub-only ist die absolute Chatmenge kleiner,
+Sub-only“); der Hinweis „Signale setzen aus“ bleibt während der **gesamten**
+Stummschaltung von rund 7 Minuten sichtbar, nicht nur während der ersten 120 s.
+Ehrlich eingeordnet: In Sub-only ist die absolute Chatmenge kleiner,
 die Erkennung bleibt relativ zum Kanal-Median. Es gibt **keine automatische
 Schwellenanpassung** – die Schwelle kann unter `/settings` manuell gesenkt
 werden.

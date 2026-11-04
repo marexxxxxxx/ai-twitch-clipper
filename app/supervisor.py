@@ -22,7 +22,7 @@ from .clip.assembler import ClipAssembler
 from .config import AppConfig, get_config
 from .db import get_sessionmaker
 from .detect.detector import Detector, TriggerDecision
-from .detect.signals import MODE_SETTLE_S, SessionSignals, sanitize_weights
+from .detect.signals import SessionSignals, sanitize_weights
 from .logging_setup import log_hub
 from .models import Recording, SignalSample, Streamer
 from .runtime_settings import SettingsService, storage_path
@@ -260,12 +260,8 @@ class LiveSession:
         self.runtime.signals_suppressed_s = self._mode_suppression(now)
 
     def _mode_suppression(self, now: datetime) -> float:
-        """Restzeit des 120-s-Settles nach einem Moduswechsel (0 = vorbei)."""
-        changed_at = self.signals.mode_changed_at
-        if changed_at is None:
-            return 0.0
-        remaining = MODE_SETTLE_S - (now - changed_at).total_seconds()
-        return max(0.0, float(remaining))
+        """Restzeit der vollen Stummschaltung (Settle + Basisaufbau)."""
+        return self.signals.suppressed_remaining(now)
 
     async def _tick_loop(self) -> None:
         while not self._stop.is_set():

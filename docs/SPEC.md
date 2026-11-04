@@ -108,7 +108,9 @@ die Basis reif, bleibt `median == 0` ein legitimes Signal für einen Burst aus
 einem ruhigen Chat. Der erste Modus einer Session ist kein Wechsel und setzt
 keinen Settle. `viewers`, `clip_created` und `clip_burst` bleiben unverändert.
 Der aktive Modus wird im Dashboard („Chat: verbunden · Sub-only“) und auf der
-Streamer-Seite angezeigt; im Sidecar steht bei offenem Chat `chat_mode: "offen"`.
+Streamer-Seite angezeigt; der Hinweis „Signale setzen aus“ deckt die **volle**
+Stummschaltung (Settle + Basisaufbau, rund 7 Minuten) ab, nicht nur die ersten
+120 s. Im Sidecar steht bei offenem Chat `chat_mode: "offen"`.
 In Sub-only ist die absolute Chatmenge kleiner; die Erkennung bleibt relativ zum
 Kanal-Median, eine automatische Schwellenanpassung gibt es nicht (Schwelle
 manuell unter `/settings`).
