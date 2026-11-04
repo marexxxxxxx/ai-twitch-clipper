@@ -9,11 +9,12 @@ import logging
 import random
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import capacity
 from .capture.buffer import RingBuffer, buffer_path, disk_allows_start, disk_should_stop
@@ -23,6 +24,7 @@ from .config import AppConfig, get_config
 from .db import get_sessionmaker
 from .detect.detector import Detector, TriggerDecision
 from .detect.signals import SessionSignals, sanitize_weights
+from .detect.weights import NEW_SIGNAL_KEYS, active_weights
 from .logging_setup import log_hub
 from .models import Recording, SignalSample, Streamer
 from .runtime_settings import SettingsService, storage_path
@@ -38,6 +40,34 @@ MAX_BUFFER_S = 360
 TRIGGER_BUFFER_RESET_S = 300
 #: Cache gilt nach dem Dreifachen des Poll-Intervalls als veraltet.
 CACHE_STALE_FACTOR = 3
+#: Mindestabstand zwischen zwei Shadow-Logzeilen je Session.
+SHADOW_LOG_INTERVAL_S = 30.0
+#: Ab diesem Wert werden neue Chat-Signale im Shadow-Mode geloggt.
+SHADOW_LOG_THRESHOLD = 0.7
+
+
+def effective_weights_for(settings: dict[str, Any]) -> dict[str, float]:
+    """Wirksame Fusion-Gewichte; im Shadow-Mode zählen neue Signale nicht."""
+    raw_weights = settings.get("weights")
+    weights = raw_weights if isinstance(raw_weights, dict) else None
+    return active_weights(
+        sanitize_weights(weights),
+        bool(settings.get("shadow_mode", True)),
+    )
+
+
+async def recent_trigger_count(
+    session: AsyncSession,
+    streamer_id: int | None,
+    now: datetime,
+) -> int:
+    """Anzahl der Recordings dieses Streamers in der letzten Stunde (DB-basiert)."""
+    cutoff = now - timedelta(hours=1)
+    statement = select(Recording.id).where(
+        Recording.streamer_id == streamer_id,
+        Recording.created_at >= cutoff,
+    )
+    return len(list((await session.execute(statement)).scalars()))
 
 
 class TriggerError(Exception):
@@ -113,13 +143,9 @@ class LiveSession:
         self.buffer_dir = buffer_path(self.storage_root, streamer.login, stream_id)
         self.recorder: SegmentRecorder | None = None
         self.ring = RingBuffer(self.buffer_dir, keep_s=MAX_BUFFER_S)
-        self.signals = SessionSignals()
-        self.detector = Detector(
-            threshold=float(settings.get("threshold") or 0.60),
-            cooldown_s=int(settings.get("cooldown_s") or 180),
-            pre_roll_s=int(settings.get("pre_roll_s") or 240),
-            weights=sanitize_weights(settings.get("weights")),
-        )
+        self.signals = self._build_signals(settings)
+        self.detector = self._build_detector(settings)
+        self._last_shadow_log_at: datetime | None = None
         self.chat: ChatReader | None = None
         self.runtime = supervisor.states.setdefault(
             streamer.id, RuntimeState(streamer_id=streamer.id, login=streamer.login)
@@ -131,6 +157,29 @@ class LiveSession:
         self._assembly_pending = False
         self._trigger_lock = asyncio.Lock()
         self._stopped = False
+
+    @staticmethod
+    def _build_signals(
+        settings: dict[str, Any],
+        started_at: datetime | None = None,
+    ) -> SessionSignals:
+        return SessionSignals(
+            started_at=started_at,
+            hype_keywords=settings.get("hype_keywords"),
+            copypasta_min_users=int(settings.get("copypasta_min_users") or 3),
+            copypasta_window_s=int(settings.get("copypasta_window_s") or 10),
+        )
+
+    @staticmethod
+    def _build_detector(settings: dict[str, Any]) -> Detector:
+        return Detector(
+            threshold=float(settings.get("threshold") or 0.60),
+            cooldown_s=int(settings.get("cooldown_s") or 180),
+            pre_roll_s=int(settings.get("pre_roll_s") or 240),
+            weights=effective_weights_for(settings),
+            required_ticks=int(settings.get("required_ticks") or 2),
+            max_clips_per_hour=int(settings.get("max_clips_per_hour") or 60),
+        )
 
     # -- Lifecycle ----------------------------------------------------------
     async def run(self) -> None:
@@ -168,13 +217,9 @@ class LiveSession:
         self.runtime.state = "live"
         self.runtime.session_started_at = self.recorder.started_at
         self.runtime.buffer_s = 0.0
-        self.signals = SessionSignals(started_at=utcnow())
-        self.detector = Detector(
-            threshold=float(settings.get("threshold") or 0.60),
-            cooldown_s=int(settings.get("cooldown_s") or 180),
-            pre_roll_s=int(settings.get("pre_roll_s") or 240),
-            weights=sanitize_weights(settings.get("weights")),
-        )
+        self.signals = self._build_signals(settings, started_at=utcnow())
+        self.detector = self._build_detector(settings)
+        self._last_shadow_log_at = None
         logger.info(
             "LIVE: %s (Stream %s), Puffer %s",
             self.streamer.login,
@@ -265,19 +310,27 @@ class LiveSession:
             return
         now = utcnow()
         settings = await self.supervisor.settings_service.get()
+        shadow_mode = bool(settings.get("shadow_mode", True))
+        weights = effective_weights_for(settings)
         self.detector.configure(
             threshold=float(settings.get("threshold") or 0.60),
             cooldown_s=int(settings.get("cooldown_s") or 180),
             pre_roll_s=int(settings.get("pre_roll_s") or 240),
-            weights=sanitize_weights(settings.get("weights")),
+            weights=weights,
+            required_ticks=int(settings.get("required_ticks") or 2),
+            max_clips_per_hour=int(settings.get("max_clips_per_hour") or 60),
         )
         components, detail = self.signals.snapshot(now)
         buffer_s = self.recorder.buffer_seconds(MAX_BUFFER_S)
+        async with get_sessionmaker()() as session:
+            recent_triggers = await recent_trigger_count(session, self.streamer.id, now)
         decision = self.detector.update(
             components,
             now=now,
             buffer_s=buffer_s,
             anchor_ts=_anchor_from_detail(detail),
+            weights=weights,
+            recent_triggers=recent_triggers,
         )
 
         self.runtime.buffer_s = buffer_s
@@ -288,7 +341,9 @@ class LiveSession:
         self.runtime.cooldown_remaining_s = self.detector.cooldown_remaining(now)
         self.runtime.chat_connected = bool(self.chat and self.chat.connected)
 
-        await self._save_signal(now, decision.score, components)
+        await self._save_signal(now, decision.score, components, detail)
+        if shadow_mode:
+            self._log_shadow_components(now, components)
 
         # Disk-Guard: alten Pufferpfad UND aktuellen Zielpfad prüfen, damit ein
         # Speicherort-Wechsel den Guard nicht auf dem falschen Volume laufen lässt.
@@ -325,8 +380,71 @@ class LiveSession:
                 logger.warning("Trigger nicht ausgeführt (%s): %s", self.streamer.login, exc)
             except Exception:  # noqa: BLE001
                 logger.exception("Trigger-Verarbeitung fehlgeschlagen (%s)", self.streamer.login)
+        else:
+            await self._trigger_from_streamer_command(
+                settings, detail, decision, now, buffer_s, recent_triggers
+            )
 
-    async def _save_signal(self, now: datetime, score: float, components: dict[str, float]) -> None:
+    def _log_shadow_components(self, now: datetime, components: dict[str, float]) -> None:
+        hits = {
+            key: float(components.get(key, 0.0))
+            for key in NEW_SIGNAL_KEYS
+            if float(components.get(key, 0.0)) >= SHADOW_LOG_THRESHOLD
+        }
+        if not hits:
+            return
+        if (
+            self._last_shadow_log_at is not None
+            and (now - self._last_shadow_log_at).total_seconds() < SHADOW_LOG_INTERVAL_S
+        ):
+            return
+        self._last_shadow_log_at = now
+        formatted = ", ".join(f"{key}={value:.2f}" for key, value in hits.items())
+        logger.info("[shadow] %s: %s", self.streamer.login, formatted)
+
+    async def _trigger_from_streamer_command(
+        self,
+        settings: dict[str, Any],
+        detail: dict[str, Any],
+        decision: TriggerDecision,
+        now: datetime,
+        buffer_s: float,
+        recent_triggers: int,
+    ) -> None:
+        """Direkter Clip-Trigger nach Streamer-/Mod-Kommando (nicht im Shadow-Mode)."""
+        if bool(settings.get("shadow_mode", True)):
+            return
+        if not bool(settings.get("streamer_command_triggers")):
+            return
+        streamer_detail = detail.get("streamer_command")
+        hit = bool(streamer_detail.get("hit")) if isinstance(streamer_detail, dict) else False
+        if not hit:
+            return
+        allowed, reasons = self.detector.can_trigger(now, buffer_s, recent_triggers)
+        if not allowed:
+            logger.debug(
+                "Streamer/Mod-Kommando ohne Trigger (%s): %s",
+                self.streamer.login,
+                "; ".join(reasons),
+            )
+            return
+        try:
+            await self.trigger("auto", decision, manual=False, reason="Streamer/Mod-Clipping")
+        except TriggerError as exc:
+            logger.warning("Trigger nicht ausgeführt (%s): %s", self.streamer.login, exc)
+        except Exception:  # noqa: BLE001
+            logger.exception("Trigger-Verarbeitung fehlgeschlagen (%s)", self.streamer.login)
+        else:
+            # Erst nach erfolgreich angelegtem Recording den Cooldown starten.
+            self.detector.mark_triggered(now)
+
+    async def _save_signal(
+        self,
+        now: datetime,
+        score: float,
+        components: dict[str, float],
+        detail: dict[str, Any],
+    ) -> None:
         try:
             async with get_sessionmaker()() as session:
                 session.add(
@@ -335,6 +453,7 @@ class LiveSession:
                         ts=now,
                         score=float(score),
                         components=components,
+                        detail=detail,
                     )
                 )
                 await session.commit()
