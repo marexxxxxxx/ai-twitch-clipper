@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from ..timeutil import utcnow
 from ..twitch.chat import ChatMessage
 from ..twitch.types import Clip
+from .weights import DEFAULT_WEIGHTS, sanitize_weights  # re-export for existing imports
 
 BUCKET_S = 5
 HISTORY_S = 900
@@ -31,15 +32,6 @@ HYPE_EMOTES = (
     "ICANT",
     "HUH",
 )
-
-DEFAULT_WEIGHTS: dict[str, float] = {
-    "chat_rate": 0.35,
-    "emote_burst": 0.20,
-    "clip_created": 0.30,
-    "viewers": 0.15,
-    "clip_burst": 0.10,
-}
-
 
 def bucket_key(now: datetime) -> int:
     aware = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now
@@ -307,18 +299,3 @@ def fuse(components: dict[str, float], weights: dict[str, float]) -> float:
     for key, weight in weights.items():
         score += max(0.0, float(weight)) * clamp(float(components.get(key, 0.0)))
     return clamp(score / total_weight)
-
-
-def sanitize_weights(weights: dict[str, float] | None) -> dict[str, float]:
-    if not weights:
-        return dict(DEFAULT_WEIGHTS)
-    result = dict(DEFAULT_WEIGHTS)
-    for key in DEFAULT_WEIGHTS:
-        if key in weights:
-            try:
-                result[key] = max(0.0, float(weights[key]))
-            except (TypeError, ValueError):
-                result[key] = DEFAULT_WEIGHTS[key]
-    if sum(result.values()) <= 0:
-        return dict(DEFAULT_WEIGHTS)
-    return result

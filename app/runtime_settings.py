@@ -14,19 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import AppConfig, get_config
 from .db import get_sessionmaker
+from .detect.weights import DEFAULT_WEIGHTS
 from .models import Setting
 from .storage import PathCheck, StorageError, check_path
 from .timeutil import utcnow
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_WEIGHTS: dict[str, float] = {
-    "chat_rate": 0.35,
-    "emote_burst": 0.20,
-    "clip_created": 0.30,
-    "viewers": 0.15,
-    "clip_burst": 0.10,
-}
 
 #: Streamlink-Qualitätsnamen: ``720p60,best``, ``audio_only``, ``worst``.
 QUALITY_PATTERN = re.compile(r"^[a-z0-9_]+(,[a-z0-9_]+)*$")
