@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}Aufnahmen · AI Twitch Clipper{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Aufnahmen</h1>
+    <p class="muted">Sequenzen von ca. 5 Minuten inkl. Score, Sidecar und Thumbnail.</p>
+  </div>
+</section>
+
+<section class="panel">
+  <form method="get" action="/recordings" class="inline-form filters">
+    <label class="field">
+      <span>Streamer</span>
+      <select name="streamer">
+        <option value="">alle</option>
+        {% for login in streamers %}
+        <option value="{{ login }}" {{ 'selected' if filter_streamer == login }}>@{{ login }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="field">
+      <span>Status</span>
+      <select name="status">
+        <option value="">alle</option>
+        {% for value in ['ready', 'truncated', 'failed', 'pending', 'assembling'] %}
+        <option value="{{ value }}" {{ 'selected' if filter_status == value }}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="btn" type="submit">Filtern</button>
+    <a class="btn btn-ghost" href="/recordings">Zurücksetzen</a>
+  </form>
+</section>
+
+<section class="recording-list">
+  {% for r in recordings %}
+  <article class="recording" id="rec-{{ r.id }}" data-recording-id="{{ r.id }}">
+    <header>
+      <div>
+        <h3>{{ r.filename or ('Aufnahme #' ~ r.id) }}</h3>
+        <p class="muted small">
+          @{{ r.streamer_login }} · {{ r.created_at | localtime }} ·
+          Dauer {{ r.duration_s | duration if r.duration_s else '–' }} ·
+          {{ r.size_bytes | bytesize if r.size_bytes else '–' }} ·
+          Score {{ r.score | score100 }} %
+        </p>
+      </div>
+      <span class="status {{ r.status }}">{{ r.status }}</span>
+    </header>
+
+    {% if r.error %}<p class="error-text">{{ r.error }}</p>{% endif %}
+
+    {% if r.file_url %}
+    <details class="player">
+      <summary>Abspielen &amp; Details</summary>
+      <video controls preload="none" playsinline poster="{{ r.thumbnail_url or '' }}">
+        <source src="{{ r.file_url }}" type="video/mp4">
+        Dein Browser kann dieses Video nicht abspielen.
+      </video>
+      <div class="meta-grid">
+        <div><span class="muted small">Fenster</span><br>{{ r.started_at | localtime('%d.%m.%Y %H:%M:%S') }} – {{ r.ended_at | localtime('%H:%M:%S') }}</div>
+        <div><span class="muted small">Trigger</span><br>{{ r.trigger.reason if r.trigger and r.trigger.reason else '–' }}</div>
+        <div><span class="muted small">Score</span><br>{{ r.score | score100 }} %</div>
+      </div>
+    </details>
+    {% endif %}
+
+    {% if r.score_breakdown %}
+    <details class="breakdown">
+      <summary>Score-Zusammensetzung</summary>
+      <div class="table-wrap">
+        <table class="table breakdown-table">
+          <thead>
+            <tr><th>Signal</th><th>Rohwert / Detail</th><th>Gewicht</th><th>Beitrag</th></tr>
+          </thead>
+          <tbody>
+            {% for row in r.score_breakdown %}
+            <tr>
+              <td>{{ row.label }}</td>
+              <td>
+                <strong>{{ '%.2f' | format(row.value) }}</strong>
+                {% if row.detail %}<span class="muted small">{{ row.detail }}</span>{% endif %}
+              </td>
+              <td>{{ '%.2f' | format(row.weight) }}</td>
+              <td>{{ row.contribution | score100 }} %</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+    {% endif %}
+
+    <footer class="recording-actions">
+      {% if r.file_url %}
+      <a class="btn btn-small" href="{{ r.file_url }}" download>Download</a>
+      {% endif %}
+      <a class="btn btn-small btn-ghost" href="{{ r.sidecar_url }}" target="_blank" rel="noopener">Sidecar (JSON)</a>
+      {% if r.status not in ['pending', 'assembling'] %}
+      <button class="btn btn-small btn-danger js-delete-recording" data-id="{{ r.id }}" type="button">Löschen</button>
+      {% endif %}
+    </footer>
+  </article>
+  {% else %}
+  <div class="panel empty">
+    <p>Keine Aufnahmen gefunden.</p>
+    <a class="btn" href="/">Zum Dashboard</a>
+  </div>
+  {% endfor %}
+</section>
+{% endblock %}

@@ -1,0 +1,29 @@
+# Aufnahmen und Puffer
+clips/
+/data/
+*.mp4
+*.ts
+*.jpg
+*.json
+!package.json
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Datenbank
+*.db
+*.db-wal
+*.db-shm
+
+# Umgebung / Editor
+.env
+.idea/
+.vscode/
+.DS_Store

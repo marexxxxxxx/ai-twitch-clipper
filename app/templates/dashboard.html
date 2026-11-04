@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · AI Twitch Clipper{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Dashboard</h1>
+    <p class="muted">Live-Überwachung, Pufferstatus und die letzten Aufnahmen.</p>
+  </div>
+  <div class="head-meta">
+    <span class="pill" id="twitch-mode">Twitch: {{ data.twitch_mode }}</span>
+    <span class="muted small" id="refresh-hint">aktualisiert alle 5 s</span>
+  </div>
+</section>
+
+<section class="stats">
+  <div class="stat">
+    <span class="stat-label">Live</span>
+    <strong id="stat-live">{{ data.streamers | selectattr('live') | list | length }}</strong>
+    <span class="muted small">von {{ data.streamers | length }} Streamern</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Fertige Sequenzen</span>
+    <strong id="stat-ready">{{ data.counts.ready + data.counts.truncated }}</strong>
+    <span class="muted small" id="stat-failed-label">{{ data.counts.failed }} fehlgeschlagen</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Speicher frei</span>
+    <strong id="stat-disk">{{ data.disk.free_gb if data.disk.free_gb is defined else '–' }} GB</strong>
+    <span class="muted small" id="stat-disk-path">{{ data.disk.path }}</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Puffer</span>
+    <strong id="stat-buffer">{{ data.streamers | map(attribute='buffer_s') | map('round', 0) | map('int') | sum }} s</strong>
+    <span class="muted small">Ringpuffer gesamt (max. 360 s je Streamer)</span>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Streamer</h2>
+    <a class="btn btn-ghost" href="/streamers">verwalten</a>
+  </div>
+  <div class="card-grid" id="streamer-grid">
+    {% for s in data.streamers %}
+    <article class="streamer-card" data-streamer-id="{{ s.id }}" data-sparkline='{{ s.sparkline | tojson }}'>
+      <header>
+        <span class="dot {{ s.state }}"></span>
+        <div class="who">
+          <h3>{{ s.display_name }}</h3>
+          <span class="muted small">@{{ s.login }}</span>
+        </div>
+        <span class="badge {{ s.state }}">{{ s.state | upper }}</span>
+      </header>
+      <dl class="metrics">
+        <div><dt>Zuschauer</dt><dd class="js-viewers">{{ s.viewers }}</dd></div>
+        <div><dt>Uptime</dt><dd class="js-uptime">{{ s.uptime_s | duration if s.uptime_s else '–' }}</dd></div>
+        <div><dt>Puffer</dt><dd class="js-buffer">{{ s.buffer_s | round(0) | int }} s</dd></div>
+        <div><dt>Score</dt><dd class="js-score">{{ s.last_score | score100 }} %</dd></div>
+      </dl>
+      <div class="scorebar" title="Letzter Detektor-Score">
+        <span class="js-scorebar" style="width: {{ s.last_score | score100 }}%"></span>
+      </div>
+      {% if s.last_components %}
+      {% set component_labels = {'chat_rate': 'Chat-Rate', 'emote_burst': 'Emote-Burst', 'clip_created': 'Neuer Clip', 'viewers': 'Zuschauer', 'clip_burst': 'Clip-Häufung'} %}
+      <ul class="component-list" title="Signal-Zusammensetzung des letzten Ticks">
+        {% for key, value in s.last_components.items() %}
+        <li>
+          <span class="component-label">{{ component_labels.get(key, key) }}</span>
+          <span class="component-bar"><span style="width: {{ (value * 100) | round(0) | int }}%"></span></span>
+          <span class="component-value">{{ value | score100 }} %</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      <svg class="sparkline" viewBox="0 0 240 44" preserveAspectRatio="none" aria-label="Score der letzten 15 Minuten"></svg>
+      <p class="card-note js-note">
+        {% if s.last_error %}<span class="error-text">{{ s.last_error }}</span>
+        {% elif s.state == 'live' %}Chat: {{ 'verbunden' if s.chat_connected else 'nicht verbunden' }} · Cooldown {{ s.cooldown_remaining_s | round(0) | int }} s
+        {% else %}wartet auf Live-Signal{% endif %}
+      </p>
+    </article>
+    {% else %}
+    <div class="empty">
+      <p>Noch keine Streamer angelegt.</p>
+      <a class="btn" href="/streamers">Ersten Streamer hinzufügen</a>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Letzte Aufnahmen</h2>
+    <a class="btn btn-ghost" href="/recordings">alle anzeigen</a>
+  </div>
+  <div class="table-wrap">
+    <table class="table" id="recent-recordings">
+      <thead>
+        <tr><th>Zeit</th><th>Streamer</th><th>Score</th><th>Dauer</th><th>Status</th><th>Größe</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for r in data.recordings %}
+        <tr>
+          <td>{{ r.created_at | localtime('%d.%m. %H:%M') }}</td>
+          <td>@{{ r.streamer_login }}</td>
+          <td>{{ r.score | score100 }} %</td>
+          <td>{{ r.duration_s | duration if r.duration_s else '–' }}</td>
+          <td><span class="status {{ r.status }}">{{ r.status }}</span></td>
+          <td>{{ r.size_bytes | bytesize if r.size_bytes else '–' }}</td>
+          <td><a class="btn btn-small btn-ghost" href="/recordings#rec-{{ r.id }}">öffnen</a></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="muted">Noch keine Aufnahmen.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

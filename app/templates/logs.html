@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Logs · AI Twitch Clipper{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Logs</h1>
+    <p class="muted">Die letzten 500 Zeilen. Aktualisierung alle 3 Sekunden.</p>
+  </div>
+  <div class="head-meta">
+    <span class="muted small" id="log-updated">–</span>
+    <button class="btn btn-small btn-ghost" type="button" id="log-refresh">Jetzt aktualisieren</button>
+  </div>
+</section>
+
+<section class="panel logs-panel">
+  <div class="log-toolbar">
+    <label class="checkbox small"><input type="checkbox" id="log-autoscroll" checked> automatisch scrollen</label>
+    <label class="checkbox small"><input type="checkbox" id="log-wrap" checked> Zeilenumbruch</label>
+  </div>
+  <pre id="log-view" class="log-view">{% for item in items %}<span class="log-line level-{{ item.level | lower }}">{{ item.ts | localtime('%d.%m. %H:%M:%S') }} {{ item.level | upper }} [{{ item.streamer_login or 'app' }}] {{ item.message }}
+</span>{% else %}<span class="muted">Noch keine Logeinträge.</span>{% endfor %}</pre>
+</section>
+{% endblock %}

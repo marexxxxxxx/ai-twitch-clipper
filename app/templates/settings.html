@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Einstellungen · AI Twitch Clipper{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Einstellungen</h1>
+    <p class="muted">Änderungen gelten für die nächste Aufnahme; laufende Puffer bleiben unberührt.</p>
+  </div>
+</section>
+
+<form id="settings-form" class="settings-form">
+  <section class="panel">
+    <h2>Speicherort</h2>
+    <div class="inline-form">
+      <label class="field grow">
+        <span>Absoluter Pfad im Container</span>
+        <input type="text" name="storage_root" value="{{ values.storage_root }}" required>
+      </label>
+      <button class="btn btn-ghost" type="button" id="check-path">Pfad prüfen</button>
+    </div>
+    <p class="muted small" id="path-result">
+      {% if storage %}
+        {{ storage.message }} · frei {{ storage.free_gb }} GB von {{ storage.total_gb }} GB
+      {% else %}
+        Pfad konnte nicht geprüft werden.
+      {% endif %}
+    </p>
+    <p class="muted small">Der Pfad muss existieren oder angelegt werden können und beschreibbar sein. Nicht beschreibbare Pfade werden nicht gespeichert.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Erkennung</h2>
+    <div class="form-grid">
+      <label class="field">
+        <span>Schwelle (0–1)</span>
+        <input type="number" name="threshold" value="{{ values.threshold }}" min="0.05" max="1" step="0.01" required>
+        <small class="muted">Trigger ab diesem fusionierten Score (Standard 0.60).</small>
+      </label>
+      <label class="field">
+        <span>Cooldown (Sekunden)</span>
+        <input type="number" name="cooldown_s" value="{{ values.cooldown_s }}" min="0" max="7200" step="10" required>
+        <small class="muted">Mindestabstand zwischen zwei Aufnahmen.</small>
+      </label>
+      <label class="field">
+        <span>Vorlauf (Sekunden)</span>
+        <input type="number" name="pre_roll_s" value="{{ values.pre_roll_s }}" min="30" max="350" step="10" required>
+        <small class="muted">Material vor dem Trigger (Standard 240 s). Vorlauf + Nachlauf ≤ 360 s.</small>
+      </label>
+      <label class="field">
+        <span>Nachlauf (Sekunden)</span>
+        <input type="number" name="post_roll_s" value="{{ values.post_roll_s }}" min="10" max="330" step="5" required>
+        <small class="muted">Material nach dem Trigger (Standard 60 s). Vorlauf + Nachlauf ≤ 360 s.</small>
+      </label>
+      <label class="field">
+        <span>Qualität (streamlink)</span>
+        <input type="text" name="quality" value="{{ values.quality }}" required>
+        <small class="muted">Kandidatenliste, z. B. <code>720p60,best</code>. Reduziert Disk-Last.</small>
+      </label>
+      <label class="field">
+        <span>Aufbewahrung (Tage)</span>
+        <input type="number" name="retention_days" value="{{ values.retention_days }}" min="1" max="3650" step="1" required>
+      </label>
+      <label class="field">
+        <span>Max. GB je Streamer</span>
+        <input type="number" name="max_gb_per_streamer" value="{{ values.max_gb_per_streamer }}" min="1" max="100000" step="1" required>
+      </label>
+      <label class="field checkbox">
+        <span>Audio-Signal (optional, derzeit ohne Funktion)</span>
+        <input type="checkbox" name="audio_enabled" {{ 'checked' if values.audio_enabled }}>
+      </label>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Gewichte der Fusion</h2>
+    <p class="muted small">Die Summe wird automatisch auf 1 normalisiert. <code>clip_burst</code> wird zusätzlich als Verstärker gewertet.</p>
+    <div class="form-grid weights">
+      {% for key, label in [('chat_rate', 'Chat-Rate'), ('emote_burst', 'Emote-Burst'), ('clip_created', 'Neuer Clip'), ('viewers', 'Zuschauer'), ('clip_burst', 'Clip-Häufung')] %}
+      <label class="field">
+        <span>{{ label }}</span>
+        <input type="number" name="weight_{{ key }}" value="{{ values.weights[key] }}" min="0" max="1" step="0.01" required>
+      </label>
+      {% endfor %}
+    </div>
+  </section>
+
+  <div class="form-actions">
+    <button class="btn" type="submit">Speichern</button>
+    <span class="muted small" id="settings-result"></span>
+  </div>
+</form>
+{% endblock %}

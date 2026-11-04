@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}AI Twitch Clipper{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎬</text></svg>">
+  <script defer src="/static/app.js"></script>
+</head>
+<body data-page="{{ page }}">
+  <header class="topbar">
+    <a class="brand" href="/">
+      <span class="brand-mark">▶</span>
+      <span>AI Twitch Clipper</span>
+    </a>
+    <nav class="nav">
+      <a href="/" class="{{ 'active' if page == 'dashboard' }}">Dashboard</a>
+      <a href="/streamers" class="{{ 'active' if page == 'streamers' }}">Streamer</a>
+      <a href="/recordings" class="{{ 'active' if page == 'recordings' }}">Aufnahmen</a>
+      <a href="/settings" class="{{ 'active' if page == 'settings' }}">Einstellungen</a>
+      <a href="/logs" class="{{ 'active' if page == 'logs' }}">Logs</a>
+      <a href="/docs" target="_blank" rel="noopener">API</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <span>AI Twitch Clipper · lokal betrieben · intern UTC</span>
+    <span>Twitch ist eine Marke von Twitch Interactive, Inc. — dieses Projekt steht in keiner Verbindung zu Twitch.</span>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

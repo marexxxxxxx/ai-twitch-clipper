@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Streamer · AI Twitch Clipper{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Streamer</h1>
+    <p class="muted">Kanäle werden dauerhaft gespeichert und fortlaufend überwacht.</p>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Streamer hinzufügen</h2>
+  <form id="add-streamer-form" class="inline-form" autocomplete="off">
+    <label class="field grow">
+      <span>Twitch-Login</span>
+      <input type="text" name="login" placeholder="z. B. shroud" required maxlength="64" pattern="[A-Za-z0-9_]+">
+    </label>
+    <button class="btn" type="submit">Hinzufügen</button>
+  </form>
+  <p class="muted small">Der Login wird gegen Twitch aufgelöst. Unbekannte Namen werden abgelehnt. Der Kanal muss zum Start nicht live sein.</p>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Überwachte Streamer</h2>
+    <span class="muted small" id="streamer-count">{{ streamers | length }} Einträge</span>
+  </div>
+  <div class="table-wrap">
+    <table class="table" id="streamer-table">
+      <thead>
+        <tr>
+          <th>Status</th><th>Login</th><th>Anzeigename</th><th>Zuschauer</th>
+          <th>Puffer</th><th>Letzter Score</th><th>Zuletzt live</th><th>Aktionen</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in streamers %}
+        <tr data-streamer-id="{{ s.id }}" data-enabled="{{ 'true' if s.enabled else 'false' }}">
+          <td>
+            <span class="dot {{ s.state if s.enabled else 'offline' }}"></span>
+            <span class="status-text">{{ s.state | upper if s.enabled else 'PAUSIERT' }}</span>
+          </td>
+          <td><strong>@{{ s.login }}</strong>{% if s.last_error %}<div class="error-text small">{{ s.last_error }}</div>{% endif %}</td>
+          <td>{{ s.display_name }}</td>
+          <td>{{ s.viewers }}</td>
+          <td>{{ s.buffer_s | round(0) | int }} s</td>
+          <td>{{ s.last_score | score100 }} %</td>
+          <td>{{ s.last_live_at | localtime('%d.%m.%Y %H:%M') if s.last_live_at else '–' }}</td>
+          <td class="actions">
+            <button class="btn btn-small btn-ghost js-toggle" type="button">{{ 'Pause' if s.enabled else 'Aktivieren' }}</button>
+            <button class="btn btn-small btn-danger js-delete" type="button">Löschen</button>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="muted">Noch keine Streamer angelegt.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="muted small">Beim Löschen bleiben bereits erzeugte Aufnahmen auf der Festplatte erhalten.</p>
+</section>
+{% endblock %}
