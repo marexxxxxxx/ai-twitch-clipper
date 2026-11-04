@@ -28,6 +28,24 @@ class FakeSupervisor:
         return self._snapshots.get(streamer_id)
 
 
+def test_streamer_dict_exposes_queue_position() -> None:
+    from app.api.serializers import streamer_dict
+
+    streamer = SimpleNamespace(
+        id=1,
+        login="alpha",
+        display_name="Alpha",
+        twitch_user_id=None,
+        enabled=True,
+        created_at=None,
+        last_live_at=None,
+        last_error=None,
+    )
+    payload = streamer_dict(streamer, {"state": "queued", "queue_position": 2})
+
+    assert payload["queue_position"] == 2
+
+
 class FakeSettingsService:
     def __init__(self, values: dict) -> None:
         self.values = values

@@ -105,8 +105,8 @@ class HelixClient:
                 await asyncio.sleep(0.5 * (2**attempt))
         raise TwitchUnavailable(f"Helix nicht erreichbar: {last_error}") from last_error
 
-    async def fetch_channel(self, login: str) -> Channel:
-        login = login.strip().lower()
+    async def _fetch_live_channel(self, login: str) -> Channel:
+        """Live-Status ohne Clips (die laufen im separaten Clip-Poll)."""
         data = await self._get("/users", {"login": login})
         users = data if isinstance(data, list) else data.get("data") or []
         if not users:
@@ -118,7 +118,6 @@ class HelixClient:
         stream_items = streams if isinstance(streams, list) else streams.get("data") or []
         stream = stream_items[0] if stream_items else None
 
-        clips = await self.fetch_clips(login, user_id)
         return Channel(
             id=user_id,
             login=str(user.get("login") or login).lower(),
@@ -128,14 +127,19 @@ class HelixClient:
             started_at=parse_iso(stream.get("started_at")) if stream else None,
             game_name=stream.get("game_name") if stream else None,
             stream_id=str(stream.get("id")) if stream and stream.get("id") else None,
-            clips=clips,
         )
+
+    async def fetch_channel(self, login: str) -> Channel:
+        login = login.strip().lower()
+        channel = await self._fetch_live_channel(login)
+        channel.clips = await self.fetch_clips(login, channel.id)
+        return channel
 
     async def fetch_channels_batch(self, logins: list[str]) -> dict[str, Channel]:
         """Fallback ohne Helix-Batch: Einzelabfragen parallel, max. 5 gleichzeitig.
 
         Unbekannte Logins fehlen im Ergebnis; einzelne Fehler brechen den
-        restlichen Batch nicht ab.
+        restlichen Batch nicht ab. Clips werden hier nicht mitgeladen.
         """
         normalized: list[str] = []
         seen: set[str] = set()
@@ -201,6 +205,53 @@ class HelixClient:
                 )
             )
         return clips
+
+    async def fetch_clips_batch(self, logins: list[str]) -> dict[str, list[Clip]]:
+        """Clip-Poll parallel, max. 5 gleichzeitig; Fehler einzelner Logins werden übersprungen."""
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in logins:
+            login = str(raw or "").strip().lower()
+            if not login or login in seen:
+                continue
+            seen.add(login)
+            normalized.append(login)
+        if not normalized:
+            return {}
+
+        semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
+        first_error: Exception | None = None
+
+        async def fetch_one(login: str) -> tuple[str, list[Clip] | None]:
+            async with semaphore:
+                try:
+                    return login, await self.fetch_clips(login)
+                except UserNotFound:
+                    return login, None
+                except Exception as exc:  # noqa: BLE001
+                    nonlocal first_error
+                    if first_error is None:
+                        first_error = exc
+                    logger.warning("Helix-Clip-Abfrage %s fehlgeschlagen: %s", login, exc)
+                    return login, None
+
+        results = await asyncio.gather(
+            *(fetch_one(login) for login in normalized), return_exceptions=True
+        )
+        clips_by_login: dict[str, list[Clip]] = {}
+        for item in results:
+            if isinstance(item, asyncio.CancelledError):
+                raise item
+            if isinstance(item, BaseException):
+                if first_error is None:
+                    first_error = item
+                continue
+            login, clips = item
+            if clips is not None:
+                clips_by_login[login] = clips
+        if first_error is not None and not clips_by_login:
+            raise first_error
+        return clips_by_login
 
     async def fetch_top_live(self, limit: int = 20) -> list[Channel]:
         payload = await self._get("/streams", {"first": max(1, min(int(limit), 100))})

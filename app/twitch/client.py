@@ -48,6 +48,16 @@ class TwitchClient:
     async def fetch_clips(self, login: str) -> list[Clip]:
         return await self._impl.fetch_clips(login)
 
+    async def fetch_clips_batch(self, logins: list[str]) -> dict[str, list[Clip]]:
+        """Separater Clip-Poll (kleinere Chunks als der Live-Status-Batch)."""
+        fetch = getattr(self._impl, "fetch_clips_batch", None)
+        if callable(fetch):
+            return await fetch(logins)
+        result: dict[str, list[Clip]] = {}
+        for login in logins:
+            result[login.strip().lower()] = await self._impl.fetch_clips(login)
+        return result
+
     def reset_request_counter(self) -> None:
         """Setzt den Request-Zähler für den beginnenden Poll-Zyklus zurück."""
         begin = getattr(self._impl, "begin_cycle", None)

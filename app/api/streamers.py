@@ -30,7 +30,7 @@ class StreamerCreate(BaseModel):
 
 
 class BulkStreamerCreate(BaseModel):
-    input: str = ""
+    input: str = Field(default="", max_length=65536)
 
 
 class StreamerUpdate(BaseModel):

@@ -19,8 +19,17 @@ logger = logging.getLogger(__name__)
 GQL_URL = "https://gql.twitch.tv/gql"
 PUBLIC_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 
-#: Maximal so viele Logins stecken in einem Batch-POST (Twitch-GQL-Aliaslimit).
-BATCH_CHUNK_SIZE = 20
+#: Twitch GQL akzeptiert maximal 15 Root-Field-Aliase pro Query (16 ⇒ HTTP 400).
+BATCH_CHUNK_SIZE = 15
+MAX_ROOT_ALIASES = 15
+
+#: Größte stabile Batch-Größe für Clip-Abfragen.
+#: Messung 2026-11-04 gegen den echten GQL-Endpunkt (Live-Logins,
+#: ``clips(first:10, criteria:{period:LAST_DAY})``):
+#:   n=5: 5/5 erfolgreich, n=3: 5/5, n=1: 2/2.
+#: Ein 15er-Clip-Batch war zuvor instabil (nur 2/5), daher bleibt der separate
+#: Clip-Poll bewusst bei 5 Aliasen. Bei Änderungen erneut messen.
+CLIP_BATCH_SIZE = 5
 
 CHANNEL_QUERY = """
 query Channel($login: String!) {
@@ -72,7 +81,9 @@ query TopStreams($first: Int!) {
 }
 """.strip()
 
-#: Eine Kanalabfrage, wie sie im Batch je Alias verwendet wird.
+#: Live-Status-Felder je Alias. Bewusst **ohne** ``clips``: Ein Batch aus 15
+#: Aliasen mit Clip-Feldern war messbar instabil (Twitch lieferte HTTP 400/
+#: Teilfehler), während derselbe Batch ohne ``clips`` zuverlässig antwortet.
 _CHANNEL_FIELDS = """
     id
     login
@@ -83,6 +94,12 @@ _CHANNEL_FIELDS = """
       createdAt
       game { name }
     }
+""".strip()
+
+#: Clip-Felder für den separaten Clip-Poll.
+_CLIP_FIELDS = """
+    id
+    login
     clips(first: 10, criteria: {period: LAST_DAY}) {
       edges {
         node { id title createdAt durationSeconds viewCount }
@@ -91,15 +108,29 @@ _CHANNEL_FIELDS = """
 """.strip()
 
 
-def build_batch_query(count: int) -> str:
-    """Baut eine GQL-Anfrage mit ``count`` Aliasen (``a0``..``aN``)."""
+def _build_alias_query(name: str, count: int, fields: str) -> str:
     total = max(0, count)
+    if total > MAX_ROOT_ALIASES:
+        raise ValueError(
+            f"Twitch GQL erlaubt maximal {MAX_ROOT_ALIASES} Root-Field-Aliase, "
+            f"angefragt: {total}"
+        )
     declarations = ", ".join(f"$l{index}: String!" for index in range(total))
     aliases = [
-        f"  a{index}: user(login: $l{index}) {{\n{_CHANNEL_FIELDS}\n  }}"
+        f"  a{index}: user(login: $l{index}) {{\n{fields}\n  }}"
         for index in range(total)
     ]
-    return f"query BatchChannels({declarations}) {{\n" + "\n".join(aliases) + "\n}"
+    return f"query {name}({declarations}) {{\n" + "\n".join(aliases) + "\n}"
+
+
+def build_batch_query(count: int) -> str:
+    """Baut eine Live-Status-Anfrage mit ``count`` Aliasen (``a0``..``aN-1``)."""
+    return _build_alias_query("BatchChannels", count, _CHANNEL_FIELDS)
+
+
+def build_clips_batch_query(count: int) -> str:
+    """Baut eine Clip-Anfrage mit ``count`` Aliasen (ohne Live-Status-Felder)."""
+    return _build_alias_query("BatchClips", count, _CLIP_FIELDS)
 
 
 def chunk_logins(logins: list[str], size: int = BATCH_CHUNK_SIZE) -> list[list[str]]:
@@ -146,10 +177,17 @@ class GQLClient:
                 if response.status_code >= 400:
                     raise TwitchError(f"Twitch GQL HTTP {response.status_code}: {response.text[:200]}")
                 data = response.json()
+                payload = data.get("data")
                 if data.get("errors"):
                     messages = "; ".join(str(err.get("message", err)) for err in data["errors"])
+                    # Twitch liefert bei Alias-Batches oft ``data`` und ``errors``
+                    # gemeinsam (einzelne Aliase fehlen). Vorhandene Daten
+                    # behalten; nur fehlende Aliase gelten als Fehler.
+                    if isinstance(payload, dict) and payload:
+                        logger.warning("Twitch GQL Teil-Antwort (%s); nutze vorhandene Daten", messages)
+                        return payload
                     raise TwitchError(f"Twitch GQL: {messages}")
-                return data.get("data") or {}
+                return payload or {}
             except (httpx.HTTPError, TwitchUnavailable) as exc:
                 last_error = exc
                 if attempt == 3:
@@ -184,7 +222,10 @@ class GQLClient:
         return self._channel_from_user(user, login)
 
     async def fetch_channels_batch(self, logins: list[str]) -> dict[str, Channel]:
-        """Holt bis zu 20 Kanäle pro POST über GQL-Aliase.
+        """Holt bis zu 15 Live-Status-Kanäle pro POST über GQL-Aliase.
+
+        Die Anfrage enthält bewusst keine Clip-Felder; Clips kommen über
+        :meth:`fetch_clips_batch` in einem eigenen, kleineren Batch.
 
         Unbekannte Logins (``user: null``) fehlen im Ergebnis, ohne den
         restlichen Batch zu verwerfen. Fällt ein Chunk komplett aus, werden
@@ -221,6 +262,45 @@ class GQLClient:
         if errors and not channels:
             raise errors[-1]
         return channels
+
+    async def fetch_clips_batch(self, logins: list[str]) -> dict[str, list[Clip]]:
+        """Holt Clips für mehrere Logins in separaten, kleinen GQL-Batches.
+
+        ``CLIP_BATCH_SIZE`` ist der messtechnisch größte stabile Chunk. Fällt
+        ein Chunk aus, bleiben die übrigen Ergebnisse nutzbar; erst wenn kein
+        einziger Login Clips liefert, wird der Fehler weitergereicht. Der
+        Aufrufer behält bei Fehlern seinen letzten bekannten Cache.
+        """
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in logins:
+            login = str(raw or "").strip().lower()
+            if not login or login in seen:
+                continue
+            seen.add(login)
+            normalized.append(login)
+        if not normalized:
+            return {}
+
+        result: dict[str, list[Clip]] = {}
+        errors: list[Exception] = []
+        for chunk in chunk_logins(normalized, CLIP_BATCH_SIZE):
+            variables = {f"l{index}": login for index, login in enumerate(chunk)}
+            try:
+                data = await self._post(build_clips_batch_query(len(chunk)), variables)
+            except TwitchError as exc:
+                errors.append(exc)
+                logger.warning("Clip-Batch für %d Kanal/Kanäle fehlgeschlagen: %s", len(chunk), exc)
+                continue
+            for index, login in enumerate(chunk):
+                user = data.get(f"a{index}")
+                if not user:
+                    logger.debug("Twitch-Clip-Batch: Kanal '%s' fehlt in der Antwort", login)
+                    continue
+                result[login] = self._parse_clips((user.get("clips") or {}).get("edges") or [])
+        if errors and not result:
+            raise errors[-1]
+        return result
 
     async def fetch_clips(self, login: str) -> list[Clip]:
         data = await self._post(CLIPS_QUERY, {"login": login.strip().lower()})

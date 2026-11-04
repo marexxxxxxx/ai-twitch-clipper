@@ -128,21 +128,28 @@ Gemessen mit einem 720p60-Stream (streamlink + ffmpeg, Ringpuffer 360 s):
 
 | Messgröße | ein Stream | 40 Streams (Hochrechnung) |
 |---|---|---|
-| RAM (RSS) | ~108 MB (streamlink ~56 MB + ffmpeg ~52 MB) | ~4,3 GB |
-| Download | ~3 Mbit/s | ~120 Mbit/s |
-| Schreiblast Ringpuffer | ~1,3 MB/s | ~52 MB/s |
-| Ringpuffer (360 s) | ~0,5 GB | ~19 GB |
+| RAM (RSS) | ~117,5 MiB | ~4,7 GiB |
+| Download | ~3,4 Mbit/s | ~136 Mbit/s |
+| Schreiblast Ringpuffer | ~0,43 MB/s | ~17–18 MB/s |
+| Ringpuffer (360 s) | ~160 MB | ~6,2 GiB |
+
+Eine fertige 300-s-Sequenz belegt ca. 130 MB.
 
 **Empfehlung für 40 × 720p60:** 4 CPU-Kerne, 8 GB RAM, 200 Mbit/s Netzwerk,
 SSD mit mindestens 100 GB freiem Speicher. Bei 480p halbieren sich Bandbreite
-und Schreiblast.
+und Schreiblast. Der hier vermessene Host (2 Kerne, 4,1 GiB verfügbar, 58 GB
+frei) reicht für 40 × 720p60 **nicht**; auf diesem Host sind 15–20 Streams
+realistisch.
 
 `max_concurrent_streams` (Standard 40, 1–200) begrenzt, wie viele Live-Kanäle
 tatsächlich gleichzeitig aufnehmen. Weitere Live-Kanäle bleiben in der
 Warteschlange; die Streamer-Seite zeigt sie als `WARTESCHLANGE` mit „Platz n“,
 das Dashboard zeigt aktive Streams, Warteschlange, Prozesse, Speicher und die
-Twitch-Anfragen je Zyklus. Die Einstellung liegt unter `/settings` im Panel
-„Kapazität“.
+Twitch-Anfragen je Zyklus. Bei 40 überwachten Kanälen sind das 3
+Batch-Anfragen pro Zyklus (15 + 15 + 10); Clips laufen in einem separaten,
+kleineren Poll. Die Einstellung liegt unter `/settings` im Panel „Kapazität“.
+Ohne cgroup-Limit greift der Speicher-Guard auf `MemAvailable` zurück und
+startet bei weniger als 1 GB frei keine neuen Aufnahmen.
 
 ---
 
@@ -156,9 +163,15 @@ Alle Signale werden pro Aufnahme-Session in **5-Sekunden-Buckets** geführt, mit
 |---|---|---|
 | `chat_rate` | anonymer IRC-WebSocket | Nachrichten/5 s gegen Median der letzten 15 min (ohne letzte 60 s): `(rate − 2·median) / (4·median + 4)`, auf 0…1 begrenzt; Ausreißer auf 99. Perzentil gekappt; erst ab 5 min Historie |
 | `emote_burst` | Chat | reine Emote-Nachrichten + Hype-Emotes (`KEKW, LUL, OMEGALUL, Pog, PogChamp, monkaS, PepeHands, catJAM, Clap, ICANT, HUH`) je 5 s gegen eigenen Median, gleiche Formel |
-| `clip_created` | GraphQL-Poll alle 30 s | neuer Clip mit `createdAt` in den letzten 180 s ⇒ 1.0; `clip_burst = min(1, n/3)` als Verstärker |
-| `viewers` | GraphQL-Poll alle 20 s | relative Änderung über 120 s: `clamp(delta / 0.10, 0, 1)`, nur positiv |
+| `clip_created` | separater GraphQL-Clip-Poll alle 30 s | neuer Clip mit `createdAt` in den letzten 180 s ⇒ 1.0; `clip_burst = min(1, n/3)` als Verstärker |
+| `viewers` | zentraler GraphQL-Poll alle 30 s | relative Änderung über 120 s: `clamp(delta / 0.10, 0, 1)`, nur positiv |
 | `audio` | optional | in dieser Version **nicht aktiv** (siehe Abweichungen) |
+
+**Ein zentraler Poll:** Live-Status und Viewer kommen aus demselben Batch-Poll
+alle 30 s (`live_poll_s`). Der frühere separate 20-s-Viewer-Poll entfiel, weil
+Twitch pro Anfrage maximal 15 Root-Field-Aliase erlaubt und ein zweiter Poll
+das Request-Budget verdoppeln würde. Clips werden davon entkoppelt in
+kleineren Batches (`CLIP_BATCH_SIZE = 5`) ebenfalls alle 30 s geholt.
 
 **Fusion:** `score = Σ wᵢ·sᵢ / Σ wᵢ` mit den Defaults
 `chat_rate 0.35, emote_burst 0.20, clip_created 0.30, viewers 0.15`
@@ -399,7 +412,7 @@ Die gleichen Zeilen stehen unter `/logs` (max. 500) und in der Tabelle
 - **Keine VODs, kein YouTube/Kick**, kein Upload, kein Clipschnitt, keine
   ML-Bewertung. Die Heuristik ist bewusst erklärbar; neue Signale lassen sich in
   `detect/signals.py` ergänzen.
-- **Ressourcen:** 720p60 erzeugt ca. 100–150 MB pro 5-Minuten-Sequenz. Der
+- **Ressourcen:** 720p60 erzeugt ca. 130 MB pro 5-Minuten-Sequenz. Der
   Ringpuffer belegt zusätzlich bis zu 360 s pro Streamer. Speicherplatz und
   Schreiblast vor dem Dauerbetrieb prüfen.
 - **Keine Authentifizierung:** Der Dienst ist für ein vertrauenswürdiges Netz

@@ -21,8 +21,14 @@ logger = logging.getLogger(__name__)
 MEMORY_MAX_PATH = Path("/sys/fs/cgroup/memory.max")
 MEMORY_CURRENT_PATH = Path("/sys/fs/cgroup/memory.current")
 
+#: Host-Fallback, wenn die cgroup kein Limit setzt (``memory.max == "max"``).
+MEMINFO_PATH = Path("/proc/meminfo")
+
 #: Ab diesem Anteil der Speichergrenze werden keine Sessions mehr gestartet.
 MEMORY_GUARD_RATIO = 0.85
+
+#: Ohne cgroup-Limit muss mindestens so viel Host-RAM verfügbar bleiben.
+MIN_FREE_RAM_MB = 1024
 
 DEFAULT_MAX_CONCURRENT = 40
 MAX_CONCURRENT_MIN = 1
@@ -38,36 +44,78 @@ def _read_text(path: Path) -> str:
         return ""
 
 
+def host_memory() -> tuple[int | None, int | None]:
+    """Liefert ``(MemAvailable, MemTotal)`` in Bytes aus ``/proc/meminfo``."""
+    try:
+        text = MEMINFO_PATH.read_text(encoding="ascii", errors="ignore")
+    except OSError:
+        return None, None
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        key, separator, rest = line.partition(":")
+        if not separator:
+            continue
+        parts = rest.split()
+        if not parts:
+            continue
+        try:
+            value = int(parts[0])
+        except ValueError:
+            continue
+        if len(parts) > 1 and parts[1].lower() == "kb":
+            value *= 1024
+        values[key.strip()] = value
+    return values.get("MemAvailable"), values.get("MemTotal")
+
+
 def memory_usage() -> tuple[int, int | None]:
-    """Liefert ``(belegt_bytes, limit_bytes)``; ``limit`` ist ohne cgroup-Limit None."""
+    """Liefert ``(belegt_bytes, limit_bytes)``; ``limit`` ist ohne cgroup-Limit None.
+
+    ``memory.current`` wird **immer** gelesen — auch wenn ``memory.max`` "max"
+    ist. So ist ``mem_used_mb`` im Container aussagekräftig. Fehlt die cgroup
+    ganz, dient ``MemTotal - MemAvailable`` als Belegungsschätzung.
+    """
     raw_limit = _read_text(MEMORY_MAX_PATH)
-    if not raw_limit or raw_limit == "max":
-        return 0, None
-    try:
-        limit = int(raw_limit)
-    except ValueError:
-        return 0, None
-    if limit <= 0:
-        return 0, None
-    try:
-        current = max(0, int(_read_text(MEMORY_CURRENT_PATH)))
-    except ValueError:
-        current = 0
+    limit: int | None = None
+    if raw_limit and raw_limit != "max":
+        try:
+            candidate = int(raw_limit)
+        except ValueError:
+            candidate = 0
+        if candidate > 0:
+            limit = candidate
+
+    current = 0
+    raw_current = _read_text(MEMORY_CURRENT_PATH)
+    if raw_current:
+        try:
+            current = max(0, int(raw_current))
+        except ValueError:
+            current = 0
+    if current <= 0 and limit is None:
+        available, total = host_memory()
+        if available is not None and total is not None:
+            current = max(0, total - available)
     return current, limit
 
 
 def memory_guard_reason() -> str | None:
-    """Kurzer Hinweis, wenn der cgroup-Speicher über der Guard-Grenze liegt."""
+    """Hinweis, wenn cgroup-Limit oder Host-RAM keine neue Aufnahme zulassen."""
     current, limit = memory_usage()
-    if limit is None or current <= 0:
-        return None
-    ratio = current / limit
-    if ratio <= MEMORY_GUARD_RATIO:
-        return None
-    return (
-        f"Speichergrenze fast erreicht ({ratio * 100:.0f} % von "
-        f"{int(limit / MB)} MB); neue Aufnahme zurückgestellt."
-    )
+    if limit is not None and current > 0:
+        ratio = current / limit
+        if ratio > MEMORY_GUARD_RATIO:
+            return (
+                f"Speichergrenze fast erreicht ({ratio * 100:.0f} % von "
+                f"{int(limit / MB)} MB); neue Aufnahme zurückgestellt."
+            )
+    available, _total = host_memory()
+    if available is not None and available < MIN_FREE_RAM_MB * MB:
+        return (
+            f"Host-Speicher knapp ({int(available / MB)} MB verfügbar, "
+            f"mindestens {MIN_FREE_RAM_MB} MB nötig); neue Aufnahme zurückgestellt."
+        )
+    return None
 
 
 def _process_table() -> dict[int, tuple[int, str]]:
@@ -160,6 +208,8 @@ async def capacity_snapshot(supervisor: Any, settings: dict[str, Any] | None) ->
         total = enabled
 
     used, limit = memory_usage()
+    available, _host_total = host_memory()
+    guard_reason = memory_guard_reason()
     return {
         "max_concurrent": max_concurrent_streams(settings),
         "active": active,
@@ -170,6 +220,9 @@ async def capacity_snapshot(supervisor: Any, settings: dict[str, Any] | None) ->
         "processes": count_child_processes(),
         "mem_used_mb": int(used / MB),
         "mem_limit_mb": int(limit / MB) if limit is not None else None,
+        "mem_available_mb": int(available / MB) if available is not None else None,
+        "guard_active": guard_reason is not None,
+        "guard_reason": guard_reason,
         "poll_batch_size": BATCH_CHUNK_SIZE,
         "gql_requests_last_cycle": _last_cycle_requests(supervisor),
     }

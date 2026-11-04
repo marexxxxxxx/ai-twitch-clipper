@@ -364,6 +364,8 @@ class LiveSession:
                 continue
             last_version = version
             if channel is None:
+                # Unbekannter/fehlender Cache-Eintrag ist kein Offline-Signal.
+                offline_misses = 0
                 continue
             if not channel.is_live:
                 offline_misses += 1
@@ -608,7 +610,8 @@ class Supervisor:
         self.active_buffer_dirs: set[Path] = set()
 
         # Zentraler Poll-Cache (Login -> Channel/Clips). Alle Sessions lesen
-        # hier, damit pro Zyklus nur ein Batch je 20 Streamer an Twitch geht.
+        # hier, damit pro Zyklus nur ein Batch je 15 Streamer an Twitch geht.
+        # Clips haben einen eigenen, kleineren Poll (CLIP_BATCH_SIZE).
         self.channel_cache: dict[str, Channel] = {}
         self.clips_cache: dict[str, list[Clip]] = {}
         self.cache_updated_at = 0.0
@@ -621,17 +624,43 @@ class Supervisor:
 
         self._reconcile_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
+        self._clip_poll_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
     # -- Start/Stop ---------------------------------------------------------
     async def start(self) -> None:
+        await self._warn_memory_guard_start()
         self._poll_task = asyncio.create_task(self._poll_loop(), name="supervisor-poll")
+        self._clip_poll_task = asyncio.create_task(
+            self._clip_poll_loop(), name="supervisor-clip-poll"
+        )
         self._reconcile_task = asyncio.create_task(self._reconcile_loop(), name="supervisor-reconcile")
         logger.info("Supervisor gestartet")
 
+    async def _warn_memory_guard_start(self) -> None:
+        """Warnt einmalig, wenn der Guard nur über den Host-Fallback greift."""
+        _used, limit = capacity.memory_usage()
+        if limit is not None:
+            return
+        available, _total = capacity.host_memory()
+        if available is None:
+            return
+        try:
+            settings = await self.settings_service.get()
+        except Exception:  # noqa: BLE001
+            settings = {}
+        streams = capacity.max_concurrent_streams(settings)
+        if streams <= 20:
+            return
+        logger.warning(
+            "Host hat nur %.1f GB verfügbar; %d Streams brauchen ~4,7 GB – Limit prüfen.",
+            available / (1024**3),
+            streams,
+        )
+
     async def stop(self) -> None:
         self._stop.set()
-        for task_attr in ("_poll_task", "_reconcile_task"):
+        for task_attr in ("_poll_task", "_clip_poll_task", "_reconcile_task"):
             task = getattr(self, task_attr)
             if task is not None:
                 task.cancel()
@@ -726,6 +755,55 @@ class Supervisor:
         async with self._cache_lock:
             await self._refresh_cache(logins)
 
+    async def _clip_poll_loop(self) -> None:
+        """Separater Clip-Poll in eigenem Intervall (``clip_poll_s``)."""
+        while not self._stop.is_set():
+            try:
+                await self._clip_poll_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.exception("Clip-Poll-Zyklus fehlgeschlagen")
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(), timeout=max(1.0, float(self.config.clip_poll_s))
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    async def _clip_poll_once(self) -> None:
+        """Holt Clips nur für aktuell live gemeldete Streamer.
+
+        Chunks laufen über den Client (``CLIP_BATCH_SIZE``). Bei einem
+        Chunk-Fehler bleibt der letzte bekannte Clip-Cache stehen; der Loop
+        wartet anschließend das normale Intervall ab (kein Tight-Loop).
+        """
+        live_logins = sorted(
+            login for login, channel in self.channel_cache.items() if channel.is_live
+        )
+        if not live_logins:
+            return
+        async with self._cache_lock:
+            fetch = getattr(self.twitch, "fetch_clips_batch", None)
+            try:
+                if callable(fetch):
+                    clips_by_login = await fetch(live_logins)
+                else:  # pragma: no cover - Fallback für Fremd-Clients
+                    clips_by_login = {}
+                    for login in live_logins:
+                        clips_by_login[login] = await self.twitch.fetch_clips(login)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Clip-Poll fehlgeschlagen (%d Live-Streamer), nutze letzten Cache: %s",
+                    len(live_logins),
+                    exc,
+                )
+                return
+            for login, clips in clips_by_login.items():
+                self.clips_cache[login] = list(clips)
+
     async def _refresh_cache(self, logins: list[str]) -> bool:
         """Holt einen Batch und aktualisiert die Caches; True bei Erfolg."""
         reset = getattr(self.twitch, "reset_request_counter", None)
@@ -745,8 +823,9 @@ class Supervisor:
             return False
         self.gql_requests_last_cycle = self._requests_last_cycle()
         for login, channel in channels.items():
+            # Live-Status ohne Clips; der Clip-Cache wird ausschließlich vom
+            # separaten Clip-Poll gefüllt (siehe _clip_poll_once).
             self.channel_cache[login] = channel
-            self.clips_cache[login] = list(channel.clips)
         self.cache_updated_at = time.monotonic()
         self.cache_version += 1
         return True

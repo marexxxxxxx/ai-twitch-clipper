@@ -97,6 +97,7 @@ def streamer_dict(streamer: Streamer, runtime: dict[str, Any] | None = None) -> 
         "cooldown_remaining_s": runtime.get("cooldown_remaining_s", 0.0),
         "stream_id": runtime.get("stream_id"),
         "recording_id": runtime.get("recording_id"),
+        "queue_position": runtime.get("queue_position"),
     }
 
 

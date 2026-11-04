@@ -102,8 +102,8 @@ async def test_40_valid_lines_use_one_bulk_call_and_two_batches(session_factory)
     assert payload["counts"] == {"added": 40, "duplicate": 0, "not_found": 0, "invalid": 0}
     assert len(payload["items"]) == 40
     assert all(item["status"] == "added" for item in payload["items"])
-    # Ein Bulk-Aufruf, intern höchstens 20 Logins je Twitch-Batch.
-    assert [len(chunk) for chunk in twitch.calls] == [20, 20]
+    # Ein Bulk-Aufruf, intern höchstens 15 Logins je Twitch-Batch.
+    assert [len(chunk) for chunk in twitch.calls] == [15, 15, 10]
     assert await count_streamers(session_factory) == 40
     assert supervisor.kicks == 1
 
@@ -161,6 +161,19 @@ async def test_more_than_200_entries_returns_400(session_factory) -> None:
 
     assert response.status_code == 400
     assert "200" in response.json()["detail"]
+    assert twitch.calls == []
+    assert await count_streamers(session_factory) == 0
+
+
+@pytest.mark.asyncio
+async def test_oversized_input_is_rejected(session_factory) -> None:
+    twitch = FakeTwitch()
+    supervisor = FakeSupervisor()
+    app = make_app(twitch, supervisor)
+
+    response = await post_bulk(app, "a" * 65537)
+
+    assert response.status_code == 422
     assert twitch.calls == []
     assert await count_streamers(session_factory) == 0
 

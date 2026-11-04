@@ -112,6 +112,8 @@ function streamerCard(item) {
     note = `<span class="error-text">${escapeHtml(item.last_error)}</span>`;
   } else if (state === "live") {
     note = `Chat: ${item.chat_connected ? "verbunden" : "nicht verbunden"} · Cooldown ${Math.round(item.cooldown_remaining_s || 0)} s`;
+  } else if (state === "queued") {
+    note = "live, wartet auf freien Slot";
   } else {
     note = "wartet auf Live-Signal";
   }

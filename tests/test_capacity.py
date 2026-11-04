@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from types import SimpleNamespace
 
@@ -10,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from app import capacity as capacity_module
 from app.api import health
-from app.capacity import capacity_snapshot, memory_guard_reason
+from app.capacity import capacity_snapshot, memory_guard_reason, memory_usage
 from app.config import AppConfig
 from app.models import Setting, Streamer
 from app.runtime_settings import (
@@ -33,6 +34,9 @@ EXPECTED_KEYS = {
     "processes",
     "mem_used_mb",
     "mem_limit_mb",
+    "mem_available_mb",
+    "guard_active",
+    "guard_reason",
     "poll_batch_size",
     "gql_requests_last_cycle",
 }
@@ -149,8 +153,20 @@ def _patch_memory(tmp_path, monkeypatch, limit: int | str, current: int) -> None
     monkeypatch.setattr(capacity_module, "MEMORY_CURRENT_PATH", current_path)
 
 
+def _patch_meminfo(
+    tmp_path, monkeypatch, available_mb: int, total_mb: int = 8192
+) -> None:
+    path = tmp_path / "meminfo"
+    path.write_text(
+        f"MemTotal: {total_mb * 1024} kB\nMemAvailable: {available_mb * 1024} kB\n",
+        encoding="ascii",
+    )
+    monkeypatch.setattr(capacity_module, "MEMINFO_PATH", path)
+
+
 def test_memory_guard_trips_above_85_percent(tmp_path, monkeypatch) -> None:
     _patch_memory(tmp_path, monkeypatch, limit=1000 * MB, current=900 * MB)
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=4096)
 
     reason = memory_guard_reason()
     assert reason is not None
@@ -159,14 +175,58 @@ def test_memory_guard_trips_above_85_percent(tmp_path, monkeypatch) -> None:
 
 def test_memory_guard_inactive_below_threshold(tmp_path, monkeypatch) -> None:
     _patch_memory(tmp_path, monkeypatch, limit=1000 * MB, current=500 * MB)
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=4096)
 
     assert memory_guard_reason() is None
+
+
+def test_memory_usage_reads_current_even_without_limit(tmp_path, monkeypatch) -> None:
+    _patch_memory(tmp_path, monkeypatch, limit="max", current=512 * MB)
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=4096)
+
+    used, limit = memory_usage()
+    assert used == 512 * MB
+    assert limit is None
 
 
 def test_memory_guard_inactive_without_limit(tmp_path, monkeypatch) -> None:
     _patch_memory(tmp_path, monkeypatch, limit="max", current=999 * MB)
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=4096)
 
     assert memory_guard_reason() is None
+
+
+def test_memory_guard_without_limit_blocks_on_low_memavailable(tmp_path, monkeypatch) -> None:
+    _patch_memory(tmp_path, monkeypatch, limit="max", current=512 * MB)
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=512)
+
+    reason = memory_guard_reason()
+    assert reason is not None
+    assert "Host-Speicher" in reason
+    assert "512 MB" in reason
+
+    used, limit = memory_usage()
+    assert used > 0
+    assert limit is None
+
+
+@pytest.mark.asyncio
+async def test_start_warns_when_host_fallback_and_limit_above_20(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    _patch_memory(tmp_path, monkeypatch, limit="max", current=512 * MB)
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=4096)
+    supervisor = Supervisor(
+        FakeTwitch({}),
+        FakeSettingsService({"max_concurrent_streams": 40}),
+        config=AppConfig(storage_root=tmp_path, data_dir=tmp_path),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await supervisor._warn_memory_guard_start()  # noqa: SLF001
+
+    assert "Host hat nur" in caplog.text
+    assert "Limit prüfen" in caplog.text
 
 
 # -- Snapshot / Contract ---------------------------------------------------
@@ -190,6 +250,7 @@ class FakeSupervisor:
 @pytest.mark.asyncio
 async def test_capacity_snapshot_has_exact_contract(tmp_path, monkeypatch) -> None:
     _patch_memory(tmp_path, monkeypatch, limit=200 * MB, current=50 * MB)
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=2048)
     monkeypatch.setattr(capacity_module, "count_child_processes", lambda: 3)
 
     snapshot = await capacity_snapshot(FakeSupervisor(), {"max_concurrent_streams": 7})
@@ -205,12 +266,33 @@ async def test_capacity_snapshot_has_exact_contract(tmp_path, monkeypatch) -> No
         "processes": 3,
         "mem_used_mb": 50,
         "mem_limit_mb": 200,
-        "poll_batch_size": 20,
+        "mem_available_mb": 2048,
+        "guard_active": False,
+        "guard_reason": None,
+        "poll_batch_size": 15,
         "gql_requests_last_cycle": 2,
     }
 
 
-def test_capacity_endpoint_returns_contract(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_capacity_snapshot_reports_guard_without_cgroup_limit(
+    tmp_path, monkeypatch
+) -> None:
+    _patch_memory(tmp_path, monkeypatch, limit="max", current=300 * MB)
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=512)
+    monkeypatch.setattr(capacity_module, "count_child_processes", lambda: 0)
+
+    snapshot = await capacity_snapshot(FakeSupervisor(), {"max_concurrent_streams": 40})
+
+    assert snapshot["mem_limit_mb"] is None
+    assert snapshot["mem_used_mb"] == 300
+    assert snapshot["mem_available_mb"] == 512
+    assert snapshot["guard_active"] is True
+    assert snapshot["guard_reason"] is not None
+
+
+def test_capacity_endpoint_returns_contract(tmp_path, monkeypatch) -> None:
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=4096)
     monkeypatch.setattr(capacity_module, "count_child_processes", lambda: 0)
     app = FastAPI()
     app.include_router(health.router)
@@ -225,7 +307,10 @@ def test_capacity_endpoint_returns_contract(monkeypatch) -> None:
     assert set(payload) == EXPECTED_KEYS
     assert payload["active"] == 2
     assert payload["queued"] == 1
-    assert payload["poll_batch_size"] == 20
+    assert payload["poll_batch_size"] == 15
+    assert payload["mem_available_mb"] == 4096
+    assert payload["guard_active"] is False
+    assert payload["guard_reason"] is None
 
 
 # -- Laufzeit-Einstellung --------------------------------------------------
@@ -246,6 +331,7 @@ async def test_limit_one_queues_second_and_promotes_it(
 ) -> None:
     monkeypatch.setattr("app.supervisor.LiveSession", FakeSession)
     FakeSession.instances.clear()
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=4096)
     supervisor = await build_supervisor(
         session_factory, tmp_path, ["alpha", "beta"], {"max_concurrent_streams": 1}
     )
@@ -281,6 +367,7 @@ async def test_memory_guard_prevents_new_session(
     monkeypatch.setattr("app.supervisor.LiveSession", FakeSession)
     FakeSession.instances.clear()
     _patch_memory(tmp_path, monkeypatch, limit=1000 * MB, current=900 * MB)
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=4096)
 
     supervisor = await build_supervisor(
         session_factory, tmp_path, ["alpha"], {"max_concurrent_streams": 40}
@@ -291,6 +378,29 @@ async def test_memory_guard_prevents_new_session(
         state = next(iter(supervisor.states.values()))
         assert state.state == "queued"
         assert state.last_error is not None and "Speicher" in state.last_error
+        assert FakeSession.instances == []
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_memory_guard_blocks_without_cgroup_limit(
+    session_factory, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("app.supervisor.LiveSession", FakeSession)
+    FakeSession.instances.clear()
+    _patch_memory(tmp_path, monkeypatch, limit="max", current=512 * MB)
+    _patch_meminfo(tmp_path, monkeypatch, available_mb=256)
+
+    supervisor = await build_supervisor(
+        session_factory, tmp_path, ["alpha"], {"max_concurrent_streams": 40}
+    )
+    try:
+        await supervisor._reconcile()  # noqa: SLF001
+        assert await wait_until(lambda: count_states(supervisor, "queued") == 1)
+        state = next(iter(supervisor.states.values()))
+        assert state.state == "queued"
+        assert state.last_error is not None and "Host-Speicher" in state.last_error
         assert FakeSession.instances == []
     finally:
         await supervisor.stop()

@@ -29,7 +29,10 @@ Auslieferung als lauffähiger Docker-Container (docker compose), inkl. Weboberfl
 - **Live-Status / User-Auflösung / Clips:** Twitch GraphQL anonym mit öffentlicher
   Web-Client-ID (`kimne78kx3ncx6brgo4mv6wki5h1ko`). Verifiziert: liefert
   `stream{id,viewersCount,createdAt,game}`, `user.id`, `clips(first,criteria:{period:LAST_DAY})`
-  mit `createdAt`, `durationSeconds`, `viewCount`.
+  mit `createdAt`, `durationSeconds`, `viewCount`. Der Live-Status-Batch enthält
+  bewusst **keine** Clip-Felder (max. 15 Root-Field-Aliase, ohne Clips 6/6
+  stabile 15er-Anfragen); Clips laufen in einem separaten Batch
+  (`CLIP_BATCH_SIZE = 5`, n=5 5/5 erfolgreich).
 - **Optional Helix:** wenn `TWITCH_CLIENT_ID` + `TWITCH_CLIENT_SECRET` gesetzt sind,
   Helix als primäre Quelle (App-Token). Kein Zwang — das Projekt läuft ohne Zugangsdaten.
 - **Stream-URL:** `streamlink` (pip, >= 7) löst `twitch.tv/<login>` in eine HLS-Playlist auf.
@@ -84,12 +87,19 @@ Alle Signale werden pro Stream-Session in 5-s-Buckets geführt; Historie 15 min.
 2. **Emote-Burst** (`emote_burst`): Anteil reiner Emote-Nachrichten plus bekannte
    Hype-Emotes (`KEKW, LUL, OMEGALUL, Pog, PogChamp, monkaS, PepeHands, catJAM,
    Clap, ICANT, HUH`) je 5 s gegen eigenen Median. Score analog.
-3. **Neuer Clip** (`clip_created`): Poll alle 30 s. Neuer Clip mit `createdAt` in den
+3. **Neuer Clip** (`clip_created`): separater GraphQL-Clip-Poll alle 30 s, nur für
+   aktuell live gemeldete Streamer. Neuer Clip mit `createdAt` in den
    letzten 180 s ⇒ Score 1.0; Anker = `createdAt - duration/2`, begrenzt auf
    `[jetzt-300 s, jetzt]`. Mehrere neue Clips im Fenster: Score bleibt 1.0, zählt aber
    als Verstärker (`clip_burst` = min(1, n/3), Gewicht 0.1 zusätzlich).
-4. **Viewer-Delta** (`viewers`): Poll alle 20 s. Relative Änderung über 120 s;
-   Score = `clamp(delta/0.10, 0, 1)`, nur positiv.
+4. **Viewer-Delta** (`viewers`): zentraler GraphQL-Poll alle 30 s. Relative Änderung
+   über 120 s; Score = `clamp(delta/0.10, 0, 1)`, nur positiv.
+
+**Ein zentraler Poll:** Live-Status und Viewer kommen aus demselben 30-s-Batch
+(`live_poll_s`). Der frühere separate 20-s-Viewer-Poll entfiel, weil Twitch pro
+Anfrage maximal 15 Root-Field-Aliase erlaubt und ein zweiter Poll das
+Request-Budget verdoppeln würde. Clips sind davon entkoppelt und laufen in
+kleineren Batches (`CLIP_BATCH_SIZE = 5`).
 5. **Optional Audio** (`audio`, Standard aus): `ffmpeg astats` auf separatem
    Audio-Pull, RMS-Sprung. Nur dokumentieren, nicht im Default-Pfad.
 

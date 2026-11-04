@@ -70,7 +70,7 @@
     <div class="capacity-fact">
       <span class="stat-label">Twitch-Anfragen</span>
       <strong id="stat-gql">{{ data.capacity.gql_requests_last_cycle }}</strong>
-      <span class="muted small">je Zyklus (Batch-Größe {{ data.capacity.poll_batch_size }})</span>
+      <span class="muted small">je Zyklus (Batch à {{ data.capacity.poll_batch_size }}; 40 Kanäle = 3 Anfragen)</span>
     </div>
   </div>
 </section>
@@ -116,6 +116,7 @@
       <p class="card-note js-note">
         {% if s.last_error %}<span class="error-text">{{ s.last_error }}</span>
         {% elif s.state == 'live' %}Chat: {{ 'verbunden' if s.chat_connected else 'nicht verbunden' }} · Cooldown {{ s.cooldown_remaining_s | round(0) | int }} s
+        {% elif s.state == 'queued' %}live, wartet auf freien Slot
         {% else %}wartet auf Live-Signal{% endif %}
       </p>
     </article>
