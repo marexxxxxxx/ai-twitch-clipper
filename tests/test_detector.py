@@ -110,3 +110,71 @@ def test_mark_triggered_starts_cooldown_for_manual_trigger() -> None:
     blocked = detector.update(components(0.9), now=NOW + timedelta(seconds=7), buffer_s=300)
     assert not blocked.trigger
     assert blocked.cooldown_remaining_s > 0
+
+
+def test_required_ticks_one_triggers_on_first_tick():
+    detector = Detector(threshold=0.40, required_ticks=1, weights=WEIGHTS)
+    decision = detector.update(components(0.9), now=NOW, buffer_s=300)
+    assert decision.trigger
+
+
+def test_hourly_cap_blocks_trigger():
+    detector = Detector(threshold=0.40, required_ticks=1, max_clips_per_hour=2, weights=WEIGHTS)
+    detector.update(components(0.9), now=NOW, buffer_s=300, recent_triggers=2)
+    allowed, reasons = detector.can_trigger(NOW, buffer_s=300, recent_triggers=2)
+    assert not allowed
+    assert any("Stunde" in reason for reason in reasons)
+
+
+def test_component_labels_cover_all_ten_signals():
+    from app.detect.detector import COMPONENT_LABELS
+    from app.detect.weights import DEFAULT_WEIGHTS
+
+    assert set(COMPONENT_LABELS) == set(DEFAULT_WEIGHTS)
+    assert COMPONENT_LABELS["unique_chatters"] == "Unique Chatter"
+    assert COMPONENT_LABELS["hype_keywords"] == "Hype-Keywords"
+    assert COMPONENT_LABELS["copypasta"] == "Copypasta"
+    assert COMPONENT_LABELS["clip_commands"] == "Clip-Kommandos"
+    assert COMPONENT_LABELS["streamer_command"] == "Streamer/Mod-Kommando"
+
+
+def test_configure_updates_required_ticks_and_hourly_cap():
+    detector = Detector(threshold=0.60, weights=WEIGHTS)
+    detector.configure(required_ticks=3, max_clips_per_hour=5)
+    snapshot = detector.snapshot()
+    assert snapshot["required_ticks"] == 3
+    assert snapshot["max_clips_per_hour"] == 5
+    assert snapshot["triggers_last_hour"] == 0
+
+
+def test_can_trigger_reports_cooldown_and_buffer_blockers():
+    detector = Detector(threshold=0.60, cooldown_s=180, pre_roll_s=240, weights=WEIGHTS)
+    detector.mark_triggered(NOW)
+    allowed, reasons = detector.can_trigger(NOW + timedelta(seconds=5), buffer_s=100)
+    assert not allowed
+    assert any("Cooldown" in reason for reason in reasons)
+    assert any("Puffer" in reason for reason in reasons)
+
+
+def test_can_trigger_allows_when_all_constraints_are_met():
+    detector = Detector(
+        threshold=0.60,
+        cooldown_s=180,
+        pre_roll_s=240,
+        max_clips_per_hour=6,
+        weights=WEIGHTS,
+    )
+    assert detector.can_trigger(NOW, buffer_s=300, recent_triggers=5) == (True, [])
+
+
+def test_update_uses_recent_triggers_and_reports_them_in_snapshot():
+    detector = Detector(
+        threshold=0.40,
+        required_ticks=1,
+        max_clips_per_hour=2,
+        weights=WEIGHTS,
+    )
+    decision = detector.update(components(0.9), now=NOW, buffer_s=300, recent_triggers=2)
+    assert not decision.trigger
+    assert any("Stunde" in note for note in decision.notes)
+    assert detector.snapshot()["triggers_last_hour"] == 2

@@ -15,6 +15,11 @@ COMPONENT_LABELS = {
     "clip_created": "Neuer Clip",
     "viewers": "Zuschauer-Anstieg",
     "clip_burst": "Clip-Häufung",
+    "unique_chatters": "Unique Chatter",
+    "hype_keywords": "Hype-Keywords",
+    "copypasta": "Copypasta",
+    "clip_commands": "Clip-Kommandos",
+    "streamer_command": "Streamer/Mod-Kommando",
 }
 
 
@@ -52,8 +57,9 @@ def describe_trigger(components: dict[str, float], weights: dict[str, float]) ->
 class Detector:
     """Zustandsautomat je Stream-Session.
 
-    Trigger, wenn ``score >= threshold`` in zwei aufeinanderfolgenden Ticks,
-    der Cooldown abgelaufen ist und der Puffer den Vorlauf abdeckt.
+    Trigger, wenn ``score >= threshold`` in ``required_ticks`` aufeinanderfolgenden
+    Ticks, der Cooldown abgelaufen ist, der Puffer den Vorlauf abdeckt und das
+    Stundenlimit noch nicht erreicht wurde.
     """
 
     def __init__(
@@ -63,16 +69,19 @@ class Detector:
         pre_roll_s: int = 240,
         weights: dict[str, float] | None = None,
         required_ticks: int = 2,
+        max_clips_per_hour: int = 60,
     ) -> None:
         self.threshold = float(threshold)
         self.cooldown_s = int(cooldown_s)
         self.pre_roll_s = int(pre_roll_s)
         self.weights = sanitize_weights(weights)
         self.required_ticks = max(1, int(required_ticks))
+        self.max_clips_per_hour = max(1, int(max_clips_per_hour))
         self.consecutive = 0
         self.last_trigger_at: datetime | None = None
         self.last_score = 0.0
         self.last_components: dict[str, float] = {}
+        self.last_recent_triggers = 0
         self.triggers = 0
 
     def configure(
@@ -81,6 +90,8 @@ class Detector:
         cooldown_s: int | None = None,
         pre_roll_s: int | None = None,
         weights: dict[str, float] | None = None,
+        required_ticks: int | None = None,
+        max_clips_per_hour: int | None = None,
     ) -> None:
         if threshold is not None:
             self.threshold = float(threshold)
@@ -90,6 +101,33 @@ class Detector:
             self.pre_roll_s = int(pre_roll_s)
         if weights:
             self.weights = sanitize_weights(weights)
+        if required_ticks is not None:
+            self.required_ticks = max(1, int(required_ticks))
+        if max_clips_per_hour is not None:
+            self.max_clips_per_hour = max(1, int(max_clips_per_hour))
+
+    def can_trigger(
+        self,
+        now: datetime | None = None,
+        buffer_s: float = 0.0,
+        recent_triggers: int = 0,
+    ) -> tuple[bool, list[str]]:
+        """Prüft Cooldown, Vorlauf und Stundenlimit ohne Datenbankzugriff.
+
+        ``recent_triggers`` ist die von außen (aus der DB) gelieferte Anzahl
+        der Clips der letzten Stunde; der Detector zählt sie nicht selbst.
+        """
+        now = now or utcnow()
+        remaining = self.cooldown_remaining(now)
+        recent = max(0, int(recent_triggers))
+        reasons: list[str] = []
+        if remaining > 0:
+            reasons.append(f"Cooldown noch {remaining:.0f} s")
+        if buffer_s < self.pre_roll_s:
+            reasons.append(f"Puffer {buffer_s:.0f} s < Vorlauf {self.pre_roll_s} s")
+        if recent >= self.max_clips_per_hour:
+            reasons.append(f"Stundenlimit erreicht ({recent}/{self.max_clips_per_hour} Clips)")
+        return (not reasons, reasons)
 
     def update(
         self,
@@ -98,38 +136,34 @@ class Detector:
         buffer_s: float = 0.0,
         anchor_ts: float | None = None,
         weights: dict[str, float] | None = None,
+        recent_triggers: int = 0,
     ) -> TriggerDecision:
         now = now or utcnow()
         effective_weights = sanitize_weights(weights or self.weights)
         score = fuse(components, effective_weights)
         self.last_score = score
         self.last_components = dict(components)
+        self.last_recent_triggers = max(0, int(recent_triggers))
 
         if score >= self.threshold:
             self.consecutive += 1
         else:
             self.consecutive = 0
 
-        cooldown_remaining = 0.0
-        if self.last_trigger_at is not None:
-            elapsed = (now - self.last_trigger_at).total_seconds()
-            cooldown_remaining = max(0.0, self.cooldown_s - elapsed)
+        cooldown_remaining = self.cooldown_remaining(now)
+        allowed, blockers = self.can_trigger(now, buffer_s, recent_triggers)
 
         notes: list[str] = []
         if score < self.threshold:
             notes.append("Score unter Schwelle")
         if self.consecutive < self.required_ticks and score >= self.threshold:
             notes.append(f"Hysterese {self.consecutive}/{self.required_ticks}")
-        if cooldown_remaining > 0:
-            notes.append(f"Cooldown noch {cooldown_remaining:.0f} s")
-        if buffer_s < self.pre_roll_s:
-            notes.append(f"Puffer {buffer_s:.0f} s < Vorlauf {self.pre_roll_s} s")
+        notes.extend(blockers)
 
         trigger = (
             score >= self.threshold
             and self.consecutive >= self.required_ticks
-            and cooldown_remaining <= 0
-            and buffer_s >= self.pre_roll_s
+            and allowed
         )
         decision = TriggerDecision(
             trigger=trigger,
@@ -166,9 +200,12 @@ class Detector:
             "cooldown_s": self.cooldown_s,
             "pre_roll_s": self.pre_roll_s,
             "weights": dict(self.weights),
+            "required_ticks": self.required_ticks,
+            "max_clips_per_hour": self.max_clips_per_hour,
             "consecutive": self.consecutive,
             "last_score": round(self.last_score, 4),
             "last_components": dict(self.last_components),
             "last_trigger_at": self.last_trigger_at.isoformat() if self.last_trigger_at else None,
             "triggers": self.triggers,
+            "triggers_last_hour": self.last_recent_triggers,
         }
