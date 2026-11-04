@@ -45,6 +45,8 @@ class ChatMessage:
     emotes: list[str]
     emote_only: bool
     hype_count: int
+    user_id: str = ""
+    badges: str = ""
 
 
 def random_nick() -> str:
@@ -119,6 +121,8 @@ def parse_privmsg(line: str) -> ChatMessage | None:
         emotes=emotes,
         emote_only=emote_only,
         hype_count=hype_count,
+        user_id=tags.get("user-id", ""),
+        badges=tags.get("badges", ""),
     )
 
 

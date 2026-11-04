@@ -123,3 +123,21 @@ def test_parse_privmsg_hype_and_text() -> None:
 def test_parse_privmsg_ignores_non_messages() -> None:
     assert parse_privmsg("PING :tmi.twitch.tv") is None
     assert parse_privmsg(":tmi.twitch.tv 001 justinfan :Welcome") is None
+
+
+def test_parse_privmsg_reads_user_id_and_badges():
+    line = (
+        "@badges=broadcaster/1;display-name=Alpha;emotes=;user-id=123 "
+        ":alpha!alpha@alpha.tmi.twitch.tv PRIVMSG #alpha :!clip"
+    )
+    message = parse_privmsg(line)
+    assert message is not None
+    assert message.user_id == "123"
+    assert message.badges == "broadcaster/1"
+
+def test_parse_privmsg_defaults_user_id_and_badges():
+    line = "@display-name=Beta :beta!beta@beta.tmi.twitch.tv PRIVMSG #beta :haha"
+    message = parse_privmsg(line)
+    assert message is not None
+    assert message.user_id == ""
+    assert message.badges == ""
