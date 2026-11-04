@@ -7,8 +7,8 @@ Die eigentlichen Clips schneidet ein separates, nachgelagertes Modul.
 
 Enthalten sind: FastAPI-Backend, Weboberfläche (deutsch, ohne Build-Schritt),
 SQLite-Persistenz, Segmentrekorder (streamlink + ffmpeg), Chat-/Clip-/Viewer-Signale,
-Detektor mit Hysterese und Cooldown, Zusammenbau inkl. JSON-Sidecar und JPEG-Thumbnail,
-Retention, Dockerfile und docker-compose.
+Detektor mit Hysterese, Cooldown und Stundenlimit, Zusammenbau inkl. JSON-Sidecar und
+JPEG-Thumbnail, Retention, Dockerfile und docker-compose.
 
 ---
 
@@ -36,7 +36,7 @@ Danach die Oberfläche öffnen: **http://localhost:8000**
 | `/` | Dashboard: Live-Status, Zuschauer, Puffer, Score-Sparkline, letzte Aufnahmen |
 | `/streamers` | Streamer einzeln oder per Massen-Import hinzufügen, pausieren, löschen |
 | `/recordings` | Aufnahmen ansehen, herunterladen, Sidecar einsehen, löschen |
-| `/settings` | Speicherort, Schwellen, Vor-/Nachlauf, Cooldown, Qualität, Retention |
+| `/settings` | Speicherort, Schwellen, Hysterese, Stundenlimit, Shadow-Modus, Chat-Signale, Qualität, Retention |
 | `/logs` | letzte 500 Logzeilen mit Auto-Refresh |
 | `/docs` | OpenAPI-Dokumentation |
 
@@ -165,7 +165,17 @@ Alle Signale werden pro Aufnahme-Session in **5-Sekunden-Buckets** geführt, mit
 | `emote_burst` | Chat | reine Emote-Nachrichten + Hype-Emotes (`KEKW, LUL, OMEGALUL, Pog, PogChamp, monkaS, PepeHands, catJAM, Clap, ICANT, HUH`) je 5 s gegen eigenen Median, gleiche Formel |
 | `clip_created` | separater GraphQL-Clip-Poll alle 30 s | neuer Clip mit `createdAt` in den letzten 180 s ⇒ 1.0; `clip_burst = min(1, n/3)` als Verstärker |
 | `viewers` | zentraler GraphQL-Poll alle 30 s | relative Änderung über 120 s: `clamp(delta / 0.10, 0, 1)`, nur positiv |
+| `unique_chatters` | Chat | verschiedene User (`user-id`, sonst Anzeigename) je 5 s gegen eigenen Median, gleiche Burst-Formel |
+| `hype_keywords` | Chat | Treffer aus der konfigurierbaren Keyword-Liste je 5 s gegen eigenen Median, gleiche Burst-Formel |
+| `copypasta` | Chat | derselbe normalisierte Text von mindestens 3 verschiedenen Usern innerhalb von 10 s ⇒ 1.0 für 15 s, sonst 0.0 |
+| `clip_commands` | Chat | `!clip`, „clip it/that/das“, „clippen“ oder `!highlight` je 5 s gegen eigenen Median, gleiche Burst-Formel |
+| `streamer_command` | Chat | Clip-Kommando mit Broadcaster-/Mod-Badge ⇒ 1.0 für 30 s, sonst 0.0 |
 | `audio` | optional | in dieser Version **nicht aktiv** (siehe Abweichungen) |
+
+Die fünf Chat-Signale sind neu und starten mit Gewicht 0. Im **Shadow-Modus**
+werden sie trotzdem berechnet und in `signal_sample.components` sowie
+`signal_sample.detail` gespeichert, zählen aber nicht in den Score. Details und
+Auswertung stehen unter [Shadow-Modus und Auswertung](#shadow-modus-und-auswertung).
 
 **Ein zentraler Poll:** Live-Status und Viewer kommen aus demselben Batch-Poll
 alle 30 s (`live_poll_s`). Der frühere separate 20-s-Viewer-Poll entfiel, weil
@@ -173,19 +183,80 @@ Twitch pro Anfrage maximal 15 Root-Field-Aliase erlaubt und ein zweiter Poll
 das Request-Budget verdoppeln würde. Clips werden davon entkoppelt in
 kleineren Batches (`CLIP_BATCH_SIZE = 5`) ebenfalls alle 30 s geholt.
 
-**Fusion:** `score = Σ wᵢ·sᵢ / Σ wᵢ` mit den Defaults
-`chat_rate 0.35, emote_burst 0.20, clip_created 0.30, viewers 0.15`
-sowie `clip_burst 0.10` als zusätzlichem Gewicht. Die Summe wird normalisiert.
+**Fusion:** `score = Σ wᵢ·sᵢ / Σ wᵢ`. Für Neuinstallationen gilt
+`chat_rate 0.35, emote_burst 0.20, clip_created 0.30, viewers 0.15,
+clip_burst 0.10` und die fünf neuen Signale mit 0.0. Die Summe wird normalisiert.
+Bestehende Installationen behalten ihre gespeicherten Gewichte; beim Rollout
+werden nur die neuen Schlüssel mit 0.0 ergänzt.
 
-**Trigger:** `score ≥ threshold` (Default 0.60) in **zwei aufeinanderfolgenden
-Ticks**, Cooldown (Default 180 s) abgelaufen und der Puffer enthält mindestens
-den Vorlauf (Default 240 s). Der Cooldown beginnt mit dem Trigger.
+Das **Chat-Profil** (Button „Chat-Profil anwenden“) setzt:
+`chat_rate 0.20, unique_chatters 0.15, emote_burst 0.15, hype_keywords 0.10,
+copypasta 0.10, clip_commands 0.05, streamer_command 0.05, clip_created 0.10,
+viewers 0.05, clip_burst 0.05` (Summe 1,0). Es ist ein Startwert und kann
+einzeln angepasst werden.
+
+**Trigger:** `score ≥ threshold` (Neuinstallation: 0.40) in `required_ticks`
+aufeinanderfolgenden Ticks (Neuinstallation: 1), Cooldown (Default 180 s)
+abgelaufen, der Puffer enthält mindestens den Vorlauf (Default 240 s) und das
+Stundenlimit `max_clips_per_hour` (Neuinstallation: 6) ist noch nicht erreicht.
+Das Limit zählt die Recordings des Streamers aus der Datenbank und überlebt
+damit Reconnects und Neustarts. Der Cooldown beginnt mit dem Trigger.
+
+> Bestehende Installationen behalten `threshold` und `weights`. Beim ersten
+> Start nach dem Update werden nur die neuen Schlüssel angelegt, mit
+> `required_ticks=2` und `max_clips_per_hour=60`. Der Rollout setzt diese Werte
+> bewusst auf 1 bzw. 6, ohne die Gewichte zurückzusetzen.
 
 **Fenster:** `[T − Vorlauf, T + Nachlauf]`, Default also 240 s + 60 s = 300 s.
 Es wird gewartet, bis der Rekorder das Fensterende erreicht hat (Timeout 5 min).
 Randsegmente werden ganz genommen, dadurch ergibt sich eine Länge von
 300 s ± Segmentlänge. Endet der Stream vorher, wird das vorhandene Material
 verwendet und die Aufnahme als `truncated` markiert.
+
+---
+
+## Shadow-Modus und Auswertung
+
+`shadow_mode` (UI: „Neue Chat-Signale nur messen (Schatten-Modus)“, Standard
+`true`) ist für die Einführung der neuen Chat-Signale gedacht:
+
+- Alle zehn Komponenten werden berechnet und pro Tick gespeichert.
+- Die Gewichte der fünf neuen Signale werden für die Fusion auf 0 gesetzt; der
+  Score entspricht damit weiterhin dem bisherigen Verhalten (mit der aktuellen
+  Schwelle und `required_ticks`).
+- Der direkte Trigger durch ein Streamer-/Mod-Kommando ist im Shadow-Modus aus.
+- Neue Signale ≥ 0,7 erscheinen höchstens alle 30 s als `[shadow]`-Zeile im Log.
+
+Auswertung im Container:
+
+```bash
+# Letzte 48 Stunden, alle Streamer
+docker compose exec clipper \
+  python -m app.tools.shadow_report \
+  --db /data/clipper.db --hours 48
+
+# Zusätzlich Chat-Profil und Trigger-Pipeline simulieren
+docker compose exec clipper \
+  python -m app.tools.shadow_report \
+  --db /data/clipper.db --hours 48 --simulate-profile
+
+# Optional auf einen Streamer begrenzen
+docker compose exec clipper \
+  python -m app.tools.shadow_report \
+  --db /data/clipper.db --hours 48 --streamer caedrel
+```
+
+Der Report zeigt je Streamer Tick-Anzahl, p50/p95/max je Signal, die
+Top-Momente, die gespeicherten Aggregatwerte aus `signal_sample.detail` und mit
+`--simulate-profile` die „Would-trigger“-Momente samt erwarteter Clip-Rate. Die
+Datenbank wird ausschließlich lesend geöffnet.
+
+Nach 24–48 h Beobachtung kann das Profil über den Button **„Chat-Profil
+anwenden“** unter `/settings` scharfgeschaltet werden. Er setzt Schwelle 0.40,
+`required_ticks=1`, `max_clips_per_hour=6`, `shadow_mode=false`,
+`streamer_command_triggers=true` und die Chat-Profil-Gewichte. Vorher wird
+nachgefragt. Wenn danach zu viele Clips entstehen, Schwelle erhöhen,
+`required_ticks` auf 2 setzen oder das Stundenlimit senken.
 
 ---
 
@@ -222,6 +293,12 @@ Das JSON-Sidecar enthält unter anderem:
 
 ### Manuell auslösen
 
+Unter `/streamers` gibt es pro Zeile den Button **„Jetzt clippen“**. Er ruft
+`POST /api/trigger` auf; bei Erfolg erscheint „Clip wird erzeugt“, bei HTTP 409
+die Begründung. Der Button ist als Sicherheitsnetz gedacht und umgeht Cooldown
+und Stundenlimit bewusst. Die erzeugte Aufnahme zählt aber als Recording und
+damit für das Stundenlimit der automatischen Trigger.
+
 Im Container:
 
 ```bash
@@ -257,18 +334,31 @@ Alle Werte liegen in der Tabelle `setting` und sind im UI unter `/settings`
 änderbar. Änderungen greifen für die **nächste** Aufnahme; laufende Puffer
 bleiben im bisherigen Verzeichnis.
 
-| Schlüssel | Default | Bedeutung |
+| Schlüssel | Default (Neuinstallation) | Bedeutung |
 |---|---|---|
 | `storage_root` | `/data` (ENV `STORAGE_ROOT`) | Wurzel für Puffer und fertige Aufnahmen |
 | `pre_roll_s` | 240 | Vorlauf in Sekunden |
 | `post_roll_s` | 60 | Nachlauf in Sekunden |
-| `threshold` | 0.60 | Trigger-Schwelle |
+| `threshold` | 0.40 | Trigger-Schwelle |
+| `required_ticks` | 1 | Aufeinanderfolgende Ticks ≥ Schwelle (1–5) |
+| `max_clips_per_hour` | 6 | Automatische Clips je Streamer und Stunde (1–60) |
 | `cooldown_s` | 180 | Mindestabstand zwischen Triggern |
+| `shadow_mode` | true | Neue Chat-Signale nur messen, nicht fusionieren |
+| `streamer_command_triggers` | true | Streamer-/Mod-Clip-Kommando löst direkt aus (nur außerhalb des Shadow-Modus) |
+| `hype_keywords` | Standardliste | Kommagetrennte Hype-/Lacher-Begriffe (max. 500 Zeichen) |
+| `copypasta_min_users` | 3 | Mindestzahl verschiedener User für Copypasta (2–10) |
+| `copypasta_window_s` | 10 | Zeitfenster für Copypasta (5–30 s) |
 | `quality` | `720p60,best` | streamlink-Kandidatenliste |
 | `retention_days` | 14 | Aufbewahrung fertiger Aufnahmen |
 | `max_gb_per_streamer` | 50 | Quota je Streamer; älteste Aufnahmen zuerst |
-| `weights` | siehe oben | Gewichte der Fusion |
+| `weights` | siehe oben | Gewichte der zehn Signale |
 | `audio_enabled` | false | reserviert, derzeit ohne Funktion |
+
+Bestehende Installationen behalten ihre Werte. `seed_defaults()` ergänzt beim
+Start nur fehlende Schlüssel und setzt dort rückwärtskompatibel
+`required_ticks=2` sowie `max_clips_per_hour=60`; `threshold` und `weights`
+werden nicht überschrieben. Der Rollout stellt diese Werte anschließend
+bewusst auf 1 bzw. 6.
 
 **Pfadprüfung:** Beim Speichern wird der Zielordner angelegt (falls nötig) und
 mit einer Temp-Datei real beschrieben. Schlägt das fehl, bleibt der alte Wert
@@ -321,8 +411,11 @@ python -m venv .venv
 .venv/bin/pytest -q
 ```
 
-Abgedeckt: Score-Fusion/Gewichte, Hysterese, Cooldown, Puffervoraussetzung,
-Chat-/Emote-/Viewer-/Clip-Signale, Fenster- und Segmentwahl, Pfadvalidierung,
+Abgedeckt: Score-Fusion/Gewichte, Hysterese (`required_ticks`), Cooldown,
+Stundenlimit, Puffervoraussetzung, Chat-/Emote-/Viewer-/Clip-Signale,
+`unique_chatters`, `hype_keywords`, `copypasta`, `clip_commands`,
+`streamer_command`, Shadow-Modus, Migration von `signal_sample.detail`,
+Shadow-Report, Fenster- und Segmentwahl, Pfadvalidierung,
 Einstellungsvalidierung, Retention/Quota, GraphQL-Parsing (gemockt) und
 Index-Parsing des Rekorders.
 
@@ -347,13 +440,16 @@ app/
   twitch/chat.py          anonymer IRC-WebSocket
   capture/recorder.py     streamlink | ffmpeg → 2-s-Segmente
   capture/buffer.py       Ringpuffer, Segmentwahl, Disk-Guard
-  detect/signals.py       5-s-Buckets, Chat/Emote/Clip/Viewer
-  detect/detector.py      Fusion, Hysterese, Cooldown
+  detect/signals.py       5-s-Buckets, Chat/Emote/Clip/Viewer + neue Chat-Signale
+  detect/detector.py      Fusion, Hysterese, Cooldown, Stundenlimit
+  detect/weights.py       Standard- und Chat-Profil-Gewichte
+  detect/keywords.py      Hype-Keyword-Parsing und -Matching
   clip/assembler.py       Fenster, concat, Thumbnail, Sidecar
   api/                    REST-Endpunkte
   web/routes.py           server-gerenderte Seiten
   templates/, static/     UI (deutsch, ohne CDN)
   tools/simulate_trigger.py
+  tools/shadow_report.py   Shadow-Auswertung und Profil-Simulation
 tests/                    pytest
 Dockerfile, docker-compose.yml, Makefile, .env.example
 ```
@@ -455,9 +551,11 @@ docker compose exec clipper streamlink --stdout twitch.tv/<login> 720p60,best | 
 
 **Kein Trigger, obwohl es „viral“ wirkt**
 - Chat-Signale brauchen 5 Minuten Historie.
-- Schwelle im UI prüfen; Score-Sparkline beobachten.
-- Cooldown und Puffervorlauf beachten.
+- Schwelle und `required_ticks` im UI prüfen; Score-Sparkline beobachten.
+- Cooldown, Stundenlimit und Puffervorlauf beachten.
+- Im Shadow-Modus zählen die neuen Chat-Signale nicht; `shadow_mode` prüfen.
 - Clip-Signal greift nur bei Clips, die nach Session-Start erzeugt wurden.
+- Die neuen Signale mit `shadow_report.py` auswerten.
 
 **Aufnahme ist nicht exakt 300 s**
 Das ist erwartet: Randsegmente werden ganz genommen (2-s-Raster), daher
@@ -505,3 +603,10 @@ Dokumentiert, weil die Spec Abweichungen nur mit Begründung zulässt:
    streamlink 7.x brechen.
 9. **Kanal-Auflösung** nutzt im anonymen Modus die öffentliche Web-Client-ID;
    das ist kein offizieller API-Vertrag (siehe Grenzen).
+10. **Bestehende Installationen** bekommen beim Update rückwärtskompatibel
+    `required_ticks=2` und `max_clips_per_hour=60`, damit sich das Trigger-
+    Verhalten nicht unbemerkt ändert. Neuinstallationen starten mit 1 und 6.
+    Der Rollout setzt die bestehende Installation explizit auf 1 und 6.
+11. **Rohdaten der neuen Signale** (`signal_sample.detail`) enthalten nur
+    Aggregate wie Zähler, Mediane und getroffene Keywords – keine Chat-Texte
+    und keine User-Namen.
