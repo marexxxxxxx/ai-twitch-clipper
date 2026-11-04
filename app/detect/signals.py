@@ -403,6 +403,11 @@ class SessionSignals:
         emote = self.emote_signal(now)
         clip_detail = self.clip_signal(now)
         viewer = self.viewer_signal(now)
+        unique = self.unique_chatters_signal(now)
+        hype = self.hype_keywords_signal(now)
+        copypasta = self.copypasta_signal(now)
+        clip_commands = self.clip_commands_signal(now)
+        streamer_command = self.streamer_command_signal(now)
 
         components: dict[str, float] = {
             "chat_rate": round(chat.score, 4),
@@ -410,6 +415,11 @@ class SessionSignals:
             "clip_created": round(clip_detail.score, 4),
             "viewers": round(viewer.score, 4),
             "clip_burst": round(float(clip_detail.extra.get("clip_burst", 0.0)), 4),
+            "unique_chatters": round(unique.score, 4),
+            "hype_keywords": round(hype.score, 4),
+            "copypasta": round(copypasta.score, 4),
+            "clip_commands": round(clip_commands.score, 4),
+            "streamer_command": round(streamer_command.score, 4),
         }
         detail: dict[str, object] = {
             "chat_rate": {
@@ -428,6 +438,31 @@ class SessionSignals:
                 "anchor": clip_detail.extra.get("anchor"),
             },
             "viewers": {"delta": round(float(viewer.extra.get("viewers_delta", 0.0)), 4)},
+            "unique_chatters": {
+                "value": unique.metric,
+                "median": round(unique.median, 3),
+                "samples": unique.samples,
+            },
+            "hype_keywords": {
+                "value": hype.metric,
+                "median": round(hype.median, 3),
+                "samples": hype.samples,
+                "matched": hype.extra.get("matched") or "",
+            },
+            "copypasta": {
+                "active": copypasta.extra.get("active", 0.0),
+                "users": copypasta.extra.get("users", 0),
+                "window_s": copypasta.extra.get("window_s", self.copypasta_window_s),
+            },
+            "clip_commands": {
+                "value": clip_commands.metric,
+                "median": round(clip_commands.median, 3),
+                "samples": clip_commands.samples,
+            },
+            "streamer_command": {
+                "hit": streamer_command.extra.get("hit", 0.0),
+                "until": streamer_command.extra.get("until"),
+            },
         }
         return components, detail
 

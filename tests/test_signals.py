@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from app.detect.signals import (
@@ -174,6 +175,58 @@ def test_copypasta_respects_window():
     for user_id, user, age in (("1", "A", 11), ("2", "B", 9), ("3", "C", 0)):
         signals.on_chat(ChatMessage(ts=NOW - timedelta(seconds=age), user=user, user_id=user_id, text="das ist krass", emotes=[], emote_only=False, hype_count=0), now=NOW - timedelta(seconds=age))
     assert signals.copypasta_signal(NOW).score == 0.0
+
+
+def test_snapshot_contains_all_signals_and_safe_detail():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10))
+    components, detail = signals.snapshot(NOW)
+    assert set(components) == {
+        "chat_rate", "emote_burst", "clip_created", "viewers", "clip_burst",
+        "unique_chatters", "hype_keywords", "copypasta", "clip_commands", "streamer_command",
+    }
+    assert "unique_chatters" in detail
+    assert "hype_keywords" in detail
+    assert "copypasta" in detail
+    assert "clip_commands" in detail
+    assert "streamer_command" in detail
+    assert "text" not in detail["hype_keywords"]
+    assert "user" not in detail["copypasta"]
+
+
+def test_snapshot_detail_shapes_and_aggregate_only():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10), hype_keywords="geil,lol")
+    message_ts = NOW - timedelta(seconds=5)
+    chats = (
+        ("1", "Alice", "das war geil", "broadcaster/1"),
+        ("2", "Bob", "lol geil", "subscriber/12"),
+        ("3", "Carol", "einfach geil", ""),
+    )
+    for user_id, user, text, badges in chats:
+        signals.on_chat(
+            ChatMessage(
+                ts=message_ts,
+                user=user,
+                user_id=user_id,
+                text=text,
+                emotes=[],
+                emote_only=False,
+                hype_count=0,
+                badges=badges,
+            ),
+            now=message_ts,
+        )
+
+    _, detail = signals.snapshot(NOW)
+    assert set(detail["unique_chatters"]) == {"value", "median", "samples"}
+    assert set(detail["hype_keywords"]) == {"value", "median", "samples", "matched"}
+    assert set(detail["copypasta"]) == {"active", "users", "window_s"}
+    assert set(detail["clip_commands"]) == {"value", "median", "samples"}
+    assert set(detail["streamer_command"]) == {"hit", "until"}
+    assert detail["hype_keywords"]["matched"] == "geil,lol"
+
+    serialized = json.dumps(detail)
+    for raw in ("das war geil", "lol geil", "einfach geil", "Alice", "Bob", "Carol"):
+        assert raw not in serialized
 
 
 def test_parse_privmsg_emote_only() -> None:
