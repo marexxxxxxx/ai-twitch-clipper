@@ -136,13 +136,28 @@ function streamerCard(item) {
     clip_created: "Neuer Clip",
     viewers: "Zuschauer",
     clip_burst: "Clip-Häufung",
+    unique_chatters: "Unique Chatter",
+    hype_keywords: "Hype-Keywords",
+    copypasta: "Copypasta",
+    clip_commands: "Clip-Kommandos",
+    streamer_command: "Streamer/Mod-Kommando",
   };
+  const shadowKeys = new Set([
+    "unique_chatters",
+    "hype_keywords",
+    "copypasta",
+    "clip_commands",
+    "streamer_command",
+  ]);
   const components = Object.entries(item.last_components || {});
   const componentList = components.length
     ? `<ul class="component-list" title="Signal-Zusammensetzung des letzten Ticks">${components
         .map(([key, value]) => {
           const pct = Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100);
-          return `<li><span class="component-label">${escapeHtml(labels[key] || key)}</span><span class="component-bar"><span style="width:${pct}%"></span></span><span class="component-value">${pct} %</span></li>`;
+          const shadowHint = shadowKeys.has(key)
+            ? ' title="Schatten-Signal – zählt nicht in den Score"'
+            : "";
+          return `<li${shadowHint}><span class="component-label">${escapeHtml(labels[key] || key)}</span><span class="component-bar"><span style="width:${pct}%"></span></span><span class="component-value">${pct} %</span></li>`;
         })
         .join("")}</ul>`
     : "";
@@ -469,6 +484,35 @@ function initSettings() {
     });
   }
 
+  const applyProfile = $("#apply-chat-profile");
+  if (applyProfile) {
+    applyProfile.addEventListener("click", () => {
+      if (
+        !window.confirm(
+          "Chat-Profil anwenden? Schwelle, benötigte Ticks, Stundenlimit, Schatten-Modus, Streamer/Mod-Kommandos und alle zehn Gewichte werden überschrieben."
+        )
+      ) {
+        return;
+      }
+      let profile = {};
+      try {
+        profile = JSON.parse(form.dataset.chatProfile || "{}");
+      } catch (_error) {
+        profile = {};
+      }
+      form.elements.threshold.value = "0.4";
+      form.elements.required_ticks.value = "1";
+      form.elements.max_clips_per_hour.value = "6";
+      form.elements.streamer_command_triggers.checked = true;
+      form.elements.shadow_mode.checked = false;
+      for (const [key, value] of Object.entries(profile)) {
+        const input = form.elements[`weight_${key}`];
+        if (input) input.value = String(value);
+      }
+      form.requestSubmit();
+    });
+  }
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const submit = $("button[type=submit]", form);
@@ -477,9 +521,21 @@ function initSettings() {
     result.className = "muted small";
     result.textContent = "speichert …";
 
+    const weights = {};
+    form.querySelectorAll('input[name^="weight_"]').forEach((input) => {
+      weights[input.name.slice("weight_".length)] = parseFloat(input.value);
+    });
+
     const payload = {
       storage_root: form.elements.storage_root.value.trim(),
       threshold: parseFloat(form.elements.threshold.value),
+      required_ticks: parseInt(form.elements.required_ticks.value, 10),
+      max_clips_per_hour: parseInt(form.elements.max_clips_per_hour.value, 10),
+      shadow_mode: form.elements.shadow_mode.checked,
+      streamer_command_triggers: form.elements.streamer_command_triggers.checked,
+      hype_keywords: form.elements.hype_keywords.value.trim(),
+      copypasta_min_users: parseInt(form.elements.copypasta_min_users.value, 10),
+      copypasta_window_s: parseInt(form.elements.copypasta_window_s.value, 10),
       cooldown_s: parseInt(form.elements.cooldown_s.value, 10),
       pre_roll_s: parseInt(form.elements.pre_roll_s.value, 10),
       post_roll_s: parseInt(form.elements.post_roll_s.value, 10),
@@ -488,13 +544,7 @@ function initSettings() {
       max_gb_per_streamer: parseInt(form.elements.max_gb_per_streamer.value, 10),
       max_concurrent_streams: parseInt(form.elements.max_concurrent_streams.value, 10),
       audio_enabled: form.elements.audio_enabled.checked,
-      weights: {
-        chat_rate: parseFloat(form.elements.weight_chat_rate.value),
-        emote_burst: parseFloat(form.elements.weight_emote_burst.value),
-        clip_created: parseFloat(form.elements.weight_clip_created.value),
-        viewers: parseFloat(form.elements.weight_viewers.value),
-        clip_burst: parseFloat(form.elements.weight_clip_burst.value),
-      },
+      weights,
     };
 
     try {

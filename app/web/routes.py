@@ -14,6 +14,7 @@ from ..api.serializers import recording_dict, streamer_dict
 from ..capacity import capacity_snapshot
 from ..dashboard_data import build_dashboard
 from ..db import get_db
+from ..detect.weights import CHAT_PROFILE_WEIGHTS
 from ..models import LogEntry, Recording, Streamer
 from ..timeutil import duration_hms, human_bytes, iso, localtime
 
@@ -98,7 +99,12 @@ async def settings_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "settings.html",
-        {"page": "settings", "values": values, "storage": storage},
+        {
+            "page": "settings",
+            "values": values,
+            "storage": storage,
+            "chat_profile": CHAT_PROFILE_WEIGHTS,
+        },
     )
 
 

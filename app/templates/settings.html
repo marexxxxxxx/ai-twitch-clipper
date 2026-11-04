@@ -8,7 +8,7 @@
   </div>
 </section>
 
-<form id="settings-form" class="settings-form">
+<form id="settings-form" class="settings-form" data-chat-profile='{{ chat_profile | tojson }}'>
   <section class="panel">
     <h2>Speicherort</h2>
     <div class="inline-form">
@@ -34,7 +34,17 @@
       <label class="field">
         <span>Schwelle (0–1)</span>
         <input type="number" name="threshold" value="{{ values.threshold }}" min="0.05" max="1" step="0.01" required>
-        <small class="muted">Trigger ab diesem fusionierten Score (Standard 0.60).</small>
+        <small class="muted">Trigger ab diesem fusionierten Score (Standard 0.40).</small>
+      </label>
+      <label class="field">
+        <span>Benötigte Ticks</span>
+        <input type="number" name="required_ticks" value="{{ values.required_ticks }}" min="1" max="5" step="1" required>
+        <small class="muted">Aufeinanderfolgende Ticks über der Schwelle (Standard 1).</small>
+      </label>
+      <label class="field">
+        <span>Max. Clips pro Stunde</span>
+        <input type="number" name="max_clips_per_hour" value="{{ values.max_clips_per_hour }}" min="1" max="60" step="1" required>
+        <small class="muted">Gleitendes Stundenlimit für automatische Trigger.</small>
       </label>
       <label class="field">
         <span>Cooldown (Sekunden)</span>
@@ -65,8 +75,37 @@
         <input type="number" name="max_gb_per_streamer" value="{{ values.max_gb_per_streamer }}" min="1" max="100000" step="1" required>
       </label>
       <label class="field checkbox">
+        <span>Neue Chat-Signale nur messen (Schatten-Modus)</span>
+        <input type="checkbox" name="shadow_mode" {{ 'checked' if values.shadow_mode }}>
+      </label>
+      <label class="field checkbox">
+        <span>Streamer/Mod-Kommando löst sofort aus</span>
+        <input type="checkbox" name="streamer_command_triggers" {{ 'checked' if values.streamer_command_triggers }}>
+      </label>
+      <label class="field checkbox">
         <span>Audio-Signal (optional, derzeit ohne Funktion)</span>
         <input type="checkbox" name="audio_enabled" {{ 'checked' if values.audio_enabled }}>
+      </label>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Chat-Signale</h2>
+    <div class="form-grid">
+      <label class="field">
+        <span>Hype-Keywords (kommagetrennt)</span>
+        <textarea name="hype_keywords" maxlength="500">{{ values.hype_keywords }}</textarea>
+        <small class="muted">Begriffe, die im Chat als Hype gewertet werden (max. 500 Zeichen).</small>
+      </label>
+      <label class="field">
+        <span>Min. Nutzer für Copypasta</span>
+        <input type="number" name="copypasta_min_users" value="{{ values.copypasta_min_users }}" min="2" max="10" step="1" required>
+        <small class="muted">So viele unterschiedliche Nutzer müssen dieselbe Nachricht senden.</small>
+      </label>
+      <label class="field">
+        <span>Copypasta-Fenster (Sekunden)</span>
+        <input type="number" name="copypasta_window_s" value="{{ values.copypasta_window_s }}" min="5" max="30" step="1" required>
+        <small class="muted">Zeitfenster, in dem die Wiederholungen gezählt werden.</small>
       </label>
     </div>
   </section>
@@ -85,11 +124,25 @@
   <section class="panel">
     <h2>Gewichte der Fusion</h2>
     <p class="muted small">Die Summe wird automatisch auf 1 normalisiert. <code>clip_burst</code> wird zusätzlich als Verstärker gewertet.</p>
+    {% if values.shadow_mode %}
+    <p class="muted small">Im Schatten-Modus zählen die neuen Chat-Signale nicht in den Score; erst nach dem Deaktivieren werden ihre Gewichte wirksam.</p>
+    {% endif %}
     <div class="form-grid weights">
-      {% for key, label in [('chat_rate', 'Chat-Rate'), ('emote_burst', 'Emote-Burst'), ('clip_created', 'Neuer Clip'), ('viewers', 'Zuschauer'), ('clip_burst', 'Clip-Häufung')] %}
+      {% for key, label, is_new in [
+        ('chat_rate', 'Chat-Rate', false),
+        ('unique_chatters', 'Unique Chatter', true),
+        ('emote_burst', 'Emote-Burst', false),
+        ('hype_keywords', 'Hype-Keywords', true),
+        ('copypasta', 'Copypasta', true),
+        ('clip_commands', 'Clip-Kommandos', true),
+        ('streamer_command', 'Streamer/Mod-Kommando', true),
+        ('clip_created', 'Neuer Clip', false),
+        ('viewers', 'Zuschauer', false),
+        ('clip_burst', 'Clip-Häufung', false),
+      ] %}
       <label class="field">
-        <span>{{ label }}</span>
-        <input type="number" name="weight_{{ key }}" value="{{ values.weights[key] }}" min="0" max="1" step="0.01" required>
+        <span>{{ label }}{% if is_new and values.shadow_mode %} (Schatten){% endif %}</span>
+        <input type="number" name="weight_{{ key }}" value="{{ values.weights.get(key, 0) }}" min="0" max="1" step="0.01" required>
       </label>
       {% endfor %}
     </div>
@@ -97,7 +150,9 @@
 
   <div class="form-actions">
     <button class="btn" type="submit">Speichern</button>
+    <button class="btn btn-ghost" type="button" id="apply-chat-profile">Chat-Profil anwenden</button>
     <span class="muted small" id="settings-result"></span>
   </div>
+  <p class="muted small">„Chat-Profil anwenden“ setzt Schwelle 0,40, einen benötigten Tick, max. 6 Clips pro Stunde, deaktiviert den Schatten-Modus, aktiviert Streamer/Mod-Kommandos und trägt die Startgewichte ein. Vorher wird nachgefragt; einzelne Werte lassen sich danach anpassen.</p>
 </form>
 {% endblock %}

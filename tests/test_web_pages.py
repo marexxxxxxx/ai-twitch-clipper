@@ -83,6 +83,46 @@ def prepare_db(tmp_path, monkeypatch):
     return engine
 
 
+def test_settings_page_has_chat_controls(tmp_path, monkeypatch) -> None:
+    import json
+    import re
+
+    from app.detect.weights import CHAT_PROFILE_WEIGHTS
+
+    engine = prepare_db(tmp_path, monkeypatch)
+    values = default_values(AppConfig(storage_root=tmp_path, data_dir=tmp_path))
+    app = FastAPI()
+    app.include_router(web_routes.router)
+    app.state.supervisor = FakeSupervisor()
+    app.state.settings_service = FakeSettingsService(values)
+    app.state.twitch = SimpleNamespace(mode="anonymous-gql")
+    app.state.db_path = tmp_path / "web.db"
+
+    try:
+        with TestClient(app) as client:
+            page = client.get("/settings").text
+    finally:
+        asyncio.run(engine.dispose())
+
+    for needle in (
+        "required_ticks",
+        "max_clips_per_hour",
+        "shadow_mode",
+        "streamer_command_triggers",
+        "hype_keywords",
+        "copypasta_min_users",
+        "copypasta_window_s",
+        "weight_unique_chatters",
+        "apply-chat-profile",
+    ):
+        assert needle in page
+    for key in CHAT_PROFILE_WEIGHTS:
+        assert f'name="weight_{key}"' in page
+    match = re.search(r"data-chat-profile='([^']*)'", page)
+    assert match is not None
+    assert json.loads(match.group(1)) == CHAT_PROFILE_WEIGHTS
+
+
 def test_pages_render_with_queue_and_bulk_panel(tmp_path, monkeypatch) -> None:
     engine = prepare_db(tmp_path, monkeypatch)
     values = default_values(AppConfig(storage_root=tmp_path, data_dir=tmp_path))
