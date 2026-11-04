@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import AppConfig, get_config
 from .db import get_sessionmaker
+from .detect.keywords import DEFAULT_HYPE_KEYWORDS
 from .detect.weights import DEFAULT_WEIGHTS
 from .models import Setting
 from .storage import PathCheck, StorageError, check_path
@@ -47,6 +48,13 @@ EDITABLE_KEYS = {
     "weights",
     "audio_enabled",
     "max_concurrent_streams",
+    "required_ticks",
+    "max_clips_per_hour",
+    "shadow_mode",
+    "streamer_command_triggers",
+    "hype_keywords",
+    "copypasta_min_users",
+    "copypasta_window_s",
 }
 
 
@@ -60,7 +68,7 @@ def default_values(config: AppConfig | None = None) -> dict[str, Any]:
         "storage_root": str(config.storage_root),
         "pre_roll_s": 240,
         "post_roll_s": 60,
-        "threshold": 0.60,
+        "threshold": 0.40,
         "cooldown_s": 180,
         "quality": config.quality or "720p60,best",
         "retention_days": 14,
@@ -68,12 +76,28 @@ def default_values(config: AppConfig | None = None) -> dict[str, Any]:
         "weights": dict(DEFAULT_WEIGHTS),
         "audio_enabled": False,
         "max_concurrent_streams": 40,
+        "required_ticks": 1,
+        "max_clips_per_hour": 6,
+        "shadow_mode": True,
+        "streamer_command_triggers": True,
+        "hype_keywords": DEFAULT_HYPE_KEYWORDS,
+        "copypasta_min_users": 3,
+        "copypasta_window_s": 10,
     }
 
 
 async def seed_defaults(session: AsyncSession, config: AppConfig | None = None) -> None:
     existing = {row.key for row in (await session.execute(select(Setting))).scalars()}
-    for key, value in default_values(config).items():
+    is_existing = bool(existing)
+    values = default_values(config)
+    if is_existing:
+        # Bestehende Installationen behalten Schwelle und Gewichte; die neuen
+        # Chat-Signale starten in der Shadow-Phase mit konservativen Limits.
+        values["required_ticks"] = 2
+        values["max_clips_per_hour"] = 60
+        if "threshold" not in existing:
+            values["threshold"] = 0.60
+    for key, value in values.items():
         if key not in existing:
             session.add(Setting(key=key, value=value, updated_at=utcnow()))
     await session.commit()
@@ -105,6 +129,12 @@ def _as_float(value: Any, name: str, low: float, high: float) -> float:
     if not low <= number <= high:
         raise SettingsValidationError(f"{name} muss zwischen {low} und {high} liegen.")
     return number
+
+
+def _as_bool(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise SettingsValidationError(f"{name} muss ein Wahrheitswert sein.")
+    return value
 
 
 async def validate_updates(
@@ -184,6 +214,35 @@ async def validate_updates(
             "Maximal gleichzeitige Streams",
             MAX_CONCURRENT_MIN,
             MAX_CONCURRENT_MAX,
+        )
+    if "required_ticks" in payload:
+        clean["required_ticks"] = _as_int(
+            payload["required_ticks"], "Benötigte Ticks", 1, 5
+        )
+    if "max_clips_per_hour" in payload:
+        clean["max_clips_per_hour"] = _as_int(
+            payload["max_clips_per_hour"], "Max. Clips pro Stunde", 1, 60
+        )
+    if "shadow_mode" in payload:
+        clean["shadow_mode"] = _as_bool(payload["shadow_mode"], "Shadow-Modus")
+    if "streamer_command_triggers" in payload:
+        clean["streamer_command_triggers"] = _as_bool(
+            payload["streamer_command_triggers"], "Streamer-Befehle"
+        )
+    if "hype_keywords" in payload:
+        keywords = str(payload["hype_keywords"] or "").strip()
+        if len(keywords) > 500:
+            raise SettingsValidationError(
+                "Hype-Keywords dürfen höchstens 500 Zeichen lang sein."
+            )
+        clean["hype_keywords"] = keywords
+    if "copypasta_min_users" in payload:
+        clean["copypasta_min_users"] = _as_int(
+            payload["copypasta_min_users"], "Min. Nutzer für Copypasta", 2, 10
+        )
+    if "copypasta_window_s" in payload:
+        clean["copypasta_window_s"] = _as_int(
+            payload["copypasta_window_s"], "Copypasta-Fenster", 5, 30
         )
     if "weights" in payload:
         raw_weights = payload["weights"]

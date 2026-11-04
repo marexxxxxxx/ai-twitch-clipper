@@ -59,3 +59,73 @@ async def test_window_partial_update_uses_current_values() -> None:
 async def test_window_rejects_below_minimum(pre: int, post: int) -> None:
     with pytest.raises(SettingsValidationError):
         await validate_updates({"pre_roll_s": pre, "post_roll_s": post})
+
+
+@pytest.mark.parametrize("value", [1, 2, 5])
+async def test_required_ticks_accepts_range(value: int) -> None:
+    clean = await validate_updates({"required_ticks": value})
+    assert clean == {"required_ticks": value}
+
+
+@pytest.mark.parametrize("value", [0, 6, -1, "x"])
+async def test_required_ticks_rejects_out_of_range(value: object) -> None:
+    with pytest.raises(SettingsValidationError):
+        await validate_updates({"required_ticks": value})
+
+
+@pytest.mark.parametrize("value", [1, 6, 60])
+async def test_max_clips_per_hour_accepts_range(value: int) -> None:
+    clean = await validate_updates({"max_clips_per_hour": value})
+    assert clean == {"max_clips_per_hour": value}
+
+
+@pytest.mark.parametrize("value", [0, 61, -1, "x"])
+async def test_max_clips_per_hour_rejects_out_of_range(value: object) -> None:
+    with pytest.raises(SettingsValidationError):
+        await validate_updates({"max_clips_per_hour": value})
+
+
+@pytest.mark.parametrize("key", ["shadow_mode", "streamer_command_triggers"])
+@pytest.mark.parametrize("value", [True, False])
+async def test_chat_toggles_accept_only_real_booleans(key: str, value: bool) -> None:
+    clean = await validate_updates({key: value})
+    assert clean == {key: value}
+
+
+@pytest.mark.parametrize("key", ["shadow_mode", "streamer_command_triggers"])
+@pytest.mark.parametrize("value", ["yes", "true", 1, 0, None])
+async def test_chat_toggles_reject_non_booleans(key: str, value: object) -> None:
+    with pytest.raises(SettingsValidationError):
+        await validate_updates({key: value})
+
+
+async def test_hype_keywords_trims_and_allows_empty() -> None:
+    assert await validate_updates({"hype_keywords": "  geil, lol  "}) == {
+        "hype_keywords": "geil, lol"
+    }
+    assert await validate_updates({"hype_keywords": ""}) == {"hype_keywords": ""}
+    assert await validate_updates({"hype_keywords": "x" * 500}) == {"hype_keywords": "x" * 500}
+
+
+@pytest.mark.parametrize("value", [2, 5, 10])
+async def test_copypasta_min_users_accepts_range(value: int) -> None:
+    clean = await validate_updates({"copypasta_min_users": value})
+    assert clean == {"copypasta_min_users": value}
+
+
+@pytest.mark.parametrize("value", [0, 1, 11, "x"])
+async def test_copypasta_min_users_rejects_out_of_range(value: object) -> None:
+    with pytest.raises(SettingsValidationError):
+        await validate_updates({"copypasta_min_users": value})
+
+
+@pytest.mark.parametrize("value", [5, 10, 30])
+async def test_copypasta_window_accepts_range(value: int) -> None:
+    clean = await validate_updates({"copypasta_window_s": value})
+    assert clean == {"copypasta_window_s": value}
+
+
+@pytest.mark.parametrize("value", [4, 31, -1, "x"])
+async def test_copypasta_window_rejects_out_of_range(value: object) -> None:
+    with pytest.raises(SettingsValidationError):
+        await validate_updates({"copypasta_window_s": value})
