@@ -406,6 +406,18 @@ function initStreamers() {
     const id = row.dataset.streamerId;
     const login = $("strong", row)?.textContent || id;
 
+    if (button.classList.contains("js-clip")) {
+      const login = row.dataset.login;
+      button.disabled = true;
+      try {
+        await api("/api/trigger", { method: "POST", body: { login, reason: "Manuell über UI" } });
+        toast("Clip wird erzeugt.", "success");
+      } catch (error) {
+        toast(error.message, "error");
+        button.disabled = false;
+      }
+    }
+
     if (button.classList.contains("js-toggle")) {
       const enabled = row.dataset.enabled !== "true";
       button.disabled = true;

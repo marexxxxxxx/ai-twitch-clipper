@@ -153,3 +153,23 @@ def test_pages_render_with_queue_and_bulk_panel(tmp_path, monkeypatch) -> None:
             assert 'name="max_concurrent_streams"' in settings_html
     finally:
         asyncio.run(engine.dispose())
+
+
+def test_streamers_page_has_manual_clip_button(tmp_path, monkeypatch) -> None:
+    engine = prepare_db(tmp_path, monkeypatch)
+    values = default_values(AppConfig(storage_root=tmp_path, data_dir=tmp_path))
+    app = FastAPI()
+    app.include_router(web_routes.router)
+    app.state.supervisor = FakeSupervisor()
+    app.state.settings_service = FakeSettingsService(values)
+    app.state.twitch = SimpleNamespace(mode="anonymous-gql")
+    app.state.db_path = tmp_path / "web.db"
+
+    try:
+        with TestClient(app) as client:
+            page = client.get("/streamers").text
+    finally:
+        asyncio.run(engine.dispose())
+
+    assert "js-clip" in page
+    assert "Jetzt clippen" in page
