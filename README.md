@@ -168,16 +168,20 @@ Alle Signale werden pro Aufnahme-Session in **5-Sekunden-Buckets** geführt, mit
 | `audio` | optional | in dieser Version **nicht aktiv** (siehe Abweichungen) |
 
 **Chat-Modi (`ROOMSTATE`):** Der Chat-Reader wertet die `ROOMSTATE`-Events von
-Twitch aus (`subs-only`, `emote-only`, `followers-only`, `slow`). Bei einem
-Moduswechsel werden die bisherigen 5-s-Buckets verworfen und Chat- sowie
-Emote-Signal für **120 s** ausgesetzt (Settle), damit der Übergang keinen
-Trigger auslöst. Danach wird der Median ausschließlich aus Buckets der neuen
-Phase gebildet; fehlende Buckets zählen erst ab 12 vergangenen Buckets als
-Stille. Der aktive Modus erscheint im Dashboard und auf der Streamer-Seite
-(z. B. „Chat: verbunden · Sub-only“). Ehrlich eingeordnet: In Sub-only ist die
-absolute Chatmenge kleiner, die Erkennung bleibt relativ zum Kanal-Median. Es
-gibt **keine automatische Schwellenanpassung** – die Schwelle kann unter
-`/settings` manuell gesenkt werden.
+Twitch aus (`subs-only`, `emote-only`, `followers-only`, `slow`, `r9k`). Bei einem
+Moduswechsel werden die bisherigen 5-s-Buckets verworfen. Chat- und Emote-Signal
+setzen **120 s** aus (Settle) und bauen danach wie beim Sessionstart **300 s**
+neue Basis auf – der Übergang löst also insgesamt rund **7 Minuten** keinen
+Trigger aus. Die Basis beginnt erst nach dem Settle; fehlende Buckets zählen
+dabei immer als 0, 12 ist nur die Mindestanzahl ausgewerteter Buckets (bei zu
+wenigen Samples bleibt der Score 0). Nach voller Basis ist `median == 0` wieder
+ein legitimes Signal (ruhiger Chat + plötzlicher Burst). Der aktive Modus
+erscheint im Dashboard und auf der Streamer-Seite (z. B. „Chat: verbunden ·
+Sub-only“). Ehrlich eingeordnet: In Sub-only ist die absolute Chatmenge kleiner,
+die Erkennung bleibt relativ zum Kanal-Median. Es gibt **keine automatische
+Schwellenanpassung** – die Schwelle kann unter `/settings` manuell gesenkt
+werden.
+
 
 **Ein zentraler Poll:** Live-Status und Viewer kommen aus demselben Batch-Poll
 alle 30 s (`live_poll_s`). Der frühere separate 20-s-Viewer-Poll entfiel, weil

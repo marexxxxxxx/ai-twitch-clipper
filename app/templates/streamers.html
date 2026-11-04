@@ -68,7 +68,7 @@
             <span class="status-text {{ 'queued' if s.state == 'queued' and s.enabled }}">
               {{- 'WARTESCHLANGE' if s.state == 'queued' and s.enabled else (s.state | upper if s.enabled else 'PAUSIERT') -}}
             </span>
-            {% if s.chat_mode %}
+            {% if s.state == 'live' and s.chat_mode %}
             <div class="muted small">{{ s.chat_mode }}</div>
             {% endif %}
             {% if s.state == 'queued' and s.enabled and s.queue_position is not none %}

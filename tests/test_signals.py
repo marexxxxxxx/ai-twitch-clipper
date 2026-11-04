@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.detect.signals import (
     BUCKET_S,
+    MIN_HISTORY_S,
     MODE_SETTLE_S,
     SessionSignals,
     bucket_key,
@@ -140,8 +141,18 @@ def test_chat_mode_change_clears_basis_and_settles() -> None:
     signals.note_mode(ChatMode(subs_only=True), NOW)
     assert signals.mode_changed_at == NOW
     assert signals.buckets == {}
+    # Die belastbare Basis beginnt erst nach dem Settle, nicht am Wechsel.
+    assert signals._phase_start() == NOW + timedelta(seconds=MODE_SETTLE_S)
     assert signals.chat_rate_signal(NOW + timedelta(seconds=MODE_SETTLE_S - 1)).score == 0.0
     assert signals.emote_signal(NOW + timedelta(seconds=MODE_SETTLE_S - 1)).score == 0.0
+    # Auch nach dem Settle fehlt noch die 5-min-Basis: kein Score (Sparse-Guard).
+    assert signals.chat_rate_signal(NOW + timedelta(seconds=MODE_SETTLE_S + 5)).score == 0.0
+    assert signals.chat_rate_signal(NOW + timedelta(seconds=300)).samples == 0
+
+    # Nach Settle + Basisaufbau ist die Phase auswertbar (hier: ruhig, Median 0).
+    mature = signals.chat_rate_signal(NOW + timedelta(seconds=MODE_SETTLE_S + MIN_HISTORY_S + 5))
+    assert mature.samples >= 12
+    assert mature.score == 0.0
 
     # Erster Modus einer Session ist kein Übergang.
     fresh = SessionSignals(started_at=started)

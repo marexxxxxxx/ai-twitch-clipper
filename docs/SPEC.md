@@ -96,18 +96,23 @@ Alle Signale werden pro Stream-Session in 5-s-Buckets geführt; Historie 15 min.
    über 120 s; Score = `clamp(delta/0.10, 0, 1)`, nur positiv.
 
 **Chat-Modi:** Twitch sendet beim JOIN und bei jeder Änderung ein `ROOMSTATE`-Event
-(`subs-only`, `emote-only`, `followers-only`, `slow`). Der Chat-Reader parst es und
-meldet den Modus an die Session. Bei einem echten Wechsel werden die bisherigen
-5-s-Buckets verworfen und `chat_rate`/`emote_burst` für **120 s** (Settle)
-auf 0 gehalten – der Übergang kann keinen Trigger auslösen. Anschließend wird der
-Median nur aus Buckets der neuen Phase gebildet; fehlende Buckets innerhalb der
-Phase zählen als 0, aber erst ab 12 vergangenen Buckets. Der erste Modus einer
-Session ist kein Wechsel und setzt keinen Settle. `viewers`, `clip_created` und
-`clip_burst` bleiben unverändert. Der aktive Modus wird im Dashboard
-(„Chat: verbunden · Sub-only“) und auf der Streamer-Seite angezeigt. In Sub-only
-ist die absolute Chatmenge kleiner; die Erkennung bleibt relativ zum Kanal-Median,
-eine automatische Schwellenanpassung gibt es nicht (Schwelle manuell unter
-`/settings`).
+(`subs-only`, `emote-only`, `followers-only`, `slow`, `r9k`). Der Chat-Reader parst
+es, ergänzt Teil-Events aus dem bisherigen Modus und meldet den Modus an die
+Session. Bei einem echten Wechsel werden die bisherigen 5-s-Buckets verworfen.
+`chat_rate`/`emote_burst` setzen **120 s** aus (Settle) und benötigen danach wie
+beim Sessionstart **300 s** neue Basis – zusammen rund **7 Minuten** ohne
+Trigger. Die Basis beginnt erst nach dem Settle (`mode_changed_at + 120 s`),
+damit die Ramp-up-Minute nicht als Median dient. Fehlende Buckets zählen immer
+als 0; 12 ist nur die Mindestanzahl ausgewerteter Buckets (sonst Score 0). Ist
+die Basis reif, bleibt `median == 0` ein legitimes Signal für einen Burst aus
+einem ruhigen Chat. Der erste Modus einer Session ist kein Wechsel und setzt
+keinen Settle. `viewers`, `clip_created` und `clip_burst` bleiben unverändert.
+Der aktive Modus wird im Dashboard („Chat: verbunden · Sub-only“) und auf der
+Streamer-Seite angezeigt; im Sidecar steht bei offenem Chat `chat_mode: "offen"`.
+In Sub-only ist die absolute Chatmenge kleiner; die Erkennung bleibt relativ zum
+Kanal-Median, eine automatische Schwellenanpassung gibt es nicht (Schwelle
+manuell unter `/settings`).
+
 
 **Ein zentraler Poll:** Live-Status und Viewer kommen aus demselben 30-s-Batch
 (`live_poll_s`). Der frühere separate 20-s-Viewer-Poll entfiel, weil Twitch pro

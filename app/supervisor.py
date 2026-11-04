@@ -242,6 +242,8 @@ class LiveSession:
         if self.runtime.state in ("live", "connecting"):
             self.runtime.state = "offline"
             self.runtime.buffer_s = 0.0
+        self.runtime.chat_mode = ""
+        self.runtime.signals_suppressed_s = 0.0
         # Puffer dieser Session entfernen; fertige Aufnahmen liegen woanders.
         from .capture.buffer import remove_buffer_dir
 
@@ -476,7 +478,7 @@ class LiveSession:
                 "media_trigger_s": round(media_trigger, 3),
                 "stream_id": self.stream_id,
                 "session_started_at": iso(self.recorder.started_at),
-                "chat_mode": self.runtime.chat_mode,
+                "chat_mode": self.runtime.chat_mode or "offen",
             }
 
             async with get_sessionmaker()() as session:

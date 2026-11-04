@@ -131,9 +131,18 @@ class SessionSignals:
         )
 
     def _phase_start(self) -> datetime:
+        """Beginn der belastbaren Basis: erst nach dem 120-s-Settle.
+
+        Die erste Minute nach einem Wechsel ist Ramp-up (Nachrichten trudeln
+        wieder ein) und darf nicht als Median-Basis dienen.
+        """
         if self.mode_changed_at is not None and self.mode_changed_at > self.started_at:
-            return self.mode_changed_at
+            return self.mode_changed_at + timedelta(seconds=MODE_SETTLE_S)
         return self.started_at
+
+    def _basis_ready(self, now: datetime) -> bool:
+        """Mindesthistorie wie beim Sessionstart, gerechnet ab der neuen Basis."""
+        return now - self._phase_start() >= timedelta(seconds=MIN_HISTORY_S)
 
     def on_chat(self, message: ChatMessage, now: datetime | None = None) -> None:
         now = now or message.ts
@@ -257,14 +266,16 @@ class SessionSignals:
     def chat_rate_signal(self, now: datetime | None = None) -> SignalDetail:
         now = now or utcnow()
         metric = self._bucket_metric(now, "messages")
-        if self._settling(now):
-            return SignalDetail(score=0.0, metric=metric, samples=0)
-        if now - self.started_at < timedelta(seconds=MIN_HISTORY_S):
+        if self._settling(now) or not self._basis_ready(now):
             return SignalDetail(score=0.0, metric=metric, samples=0)
         values = self._window_values(now, "messages")
         if len(values) < MIN_MODE_BUCKETS:
             return SignalDetail(score=0.0, metric=metric, samples=len(values))
         median = statistics.median(values)
+        # Sparse-Guard: eine noch nicht volle Basis mit Median 0 ist kein
+        # belastbares Signal (sonst würde normaler Chat als Burst gelten).
+        if median == 0.0 and not self._basis_ready(now):
+            return SignalDetail(score=0.0, metric=metric, median=median, samples=len(values))
         return SignalDetail(
             score=burst_score(metric, median),
             metric=metric,
@@ -276,14 +287,14 @@ class SessionSignals:
     def emote_signal(self, now: datetime | None = None) -> SignalDetail:
         now = now or utcnow()
         metric = self._bucket_metric(now, "emotes")
-        if self._settling(now):
-            return SignalDetail(score=0.0, metric=metric, samples=0)
-        if now - self.started_at < timedelta(seconds=MIN_HISTORY_S):
+        if self._settling(now) or not self._basis_ready(now):
             return SignalDetail(score=0.0, metric=metric, samples=0)
         values = self._window_values(now, "emotes")
         if len(values) < MIN_MODE_BUCKETS:
             return SignalDetail(score=0.0, metric=metric, samples=len(values))
         median = statistics.median(values)
+        if median == 0.0 and not self._basis_ready(now):
+            return SignalDetail(score=0.0, metric=metric, median=median, samples=len(values))
         return SignalDetail(
             score=burst_score(metric, median),
             metric=metric,

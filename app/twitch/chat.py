@@ -51,19 +51,21 @@ class ChatMessage:
 class ChatMode:
     """Chat-Restriktionen aus einem ``ROOMSTATE``-Event.
 
-    ``followers_only`` ist in Minuten angegeben: ``-1`` = aus, ``0`` = alle
-    Follower (jeder darf schreiben), ``>0`` = Mindest-Follow-Dauer.
-    ``slow`` ist die Slow-Mode-Pause in Sekunden (``0`` = aus).
+    ``followers_only`` ist in Minuten angegeben: ``-1`` = aus, ``0`` = nur
+    Follower ohne Mindestdauer (jeder Follower darf schreiben), ``>0`` =
+    Mindest-Follow-Dauer. ``slow`` ist die Slow-Mode-Pause in Sekunden
+    (``0`` = aus). ``r9k`` markiert den Unique-Chat-Modus.
     """
 
     subs_only: bool = False
     emote_only: bool = False
     followers_only: int = -1
     slow: int = 0
+    r9k: bool = False
 
     @property
     def restricted(self) -> bool:
-        return self.subs_only or self.emote_only or self.followers_only >= 0 or self.slow > 0
+        return self.subs_only or self.emote_only or self.followers_only >= 0 or self.slow > 0 or self.r9k
 
     @property
     def label(self) -> str:
@@ -73,19 +75,31 @@ class ChatMode:
         if self.emote_only:
             parts.append("Emote-only")
         if self.followers_only >= 0:
-            parts.append(
-                "Followers-only"
-                if self.followers_only == 0
-                else f"Followers-only {self.followers_only} min"
-            )
+            if self.followers_only == 0:
+                parts.append("Followers-only")
+            elif self.followers_only % 60 == 0:
+                parts.append(f"Followers-only {self.followers_only // 60} h")
+            else:
+                parts.append(f"Followers-only {self.followers_only} min")
         if self.slow > 0:
             parts.append(f"Slow {self.slow} s")
+        if self.r9k:
+            parts.append("r9k")
         return " · ".join(parts)
 
 
 def random_nick() -> str:
     suffix = "".join(random.choices(string.digits, k=8))
     return f"justinfan{suffix}"
+
+
+_TAG_ESCAPE_RE = re.compile(r"\\(.)", re.DOTALL)
+_TAG_ESCAPES = {"s": " ", ":": ";", "\\": "\\", "r": "\r", "n": "\n"}
+
+
+def _unescape_tag(value: str) -> str:
+    """Löst IRC-Tag-Escapes in einem Durchlauf auf (kein doppeltes Entschärfen)."""
+    return _TAG_ESCAPE_RE.sub(lambda match: _TAG_ESCAPES.get(match.group(1), "\\" + match.group(1)), value)
 
 
 def _parse_tags(raw: str) -> dict[str, str]:
@@ -95,9 +109,7 @@ def _parse_tags(raw: str) -> dict[str, str]:
             key, value = part.split("=", 1)
         else:
             key, value = part, ""
-        tags[key.replace("\\s", " ")] = (
-            value.replace("\\s", " ").replace("\\:", ";").replace("\\\\", "\\").replace("\\r", "\r").replace("\\n", "\n")
-        )
+        tags[_unescape_tag(key)] = _unescape_tag(value)
     return tags
 
 
@@ -161,24 +173,37 @@ def parse_privmsg(line: str) -> ChatMessage | None:
 _ROOMSTATE_RE = re.compile(r"^@(?P<tags>\S+) :tmi\.twitch\.tv ROOMSTATE #", re.IGNORECASE)
 
 
-def parse_roomstate(line: str) -> ChatMode | None:
-    """Parst ein ``ROOMSTATE``-Event. Fehlende Tags gelten als Defaults."""
+def parse_roomstate(line: str, base: ChatMode | None = None) -> ChatMode | None:
+    """Parst ein ``ROOMSTATE``-Event. Fehlende Tags übernehmen den Wert aus ``base``.
+
+    Twitch sendet beim JOIN ein vollständiges ROOMSTATE, bei Änderungen aber
+    häufig nur das geänderte Tag. Ohne ``base`` gelten Defaults (offener Chat).
+    """
     match = _ROOMSTATE_RE.match(line)
     if match is None:
         return None
     tags = _parse_tags(match.group("tags"))
+    defaults = base or ChatMode()
 
-    def _int(name: str, default: int) -> int:
+    def _flag(name: str, fallback: bool) -> bool:
+        if name not in tags:
+            return fallback
+        return tags[name] == "1"
+
+    def _int(name: str, fallback: int) -> int:
+        if name not in tags:
+            return fallback
         try:
-            return int(tags.get(name, ""))
+            return int(tags[name])
         except (TypeError, ValueError):
-            return default
+            return fallback
 
     return ChatMode(
-        subs_only=tags.get("subs-only") == "1",
-        emote_only=tags.get("emote-only") == "1",
-        followers_only=_int("followers-only", -1),
-        slow=_int("slow", 0),
+        subs_only=_flag("subs-only", defaults.subs_only),
+        emote_only=_flag("emote-only", defaults.emote_only),
+        followers_only=_int("followers-only", defaults.followers_only),
+        slow=_int("slow", defaults.slow),
+        r9k=_flag("r9k", defaults.r9k),
     )
 
 
@@ -256,7 +281,7 @@ class ChatReader:
                                 await ws.send("PONG :tmi.twitch.tv")
                                 continue
                             try:
-                                mode = parse_roomstate(line)
+                                mode = parse_roomstate(line, self.mode)
                             except Exception:  # noqa: BLE001 - eine kaputte Zeile darf den Chat nicht töten
                                 logger.debug("ROOMSTATE nicht parsebar: %s", line[:200])
                                 mode = None
