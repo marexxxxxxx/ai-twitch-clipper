@@ -21,8 +21,14 @@ RECENT_EXCLUDE_S = 60
 CLIP_WINDOW_S = 180
 VIEWER_DELTA_S = 120
 STREAMER_COMMAND_HOLD_S = 30
+COPYPASTA_HOLD_S = 15
+COPYPASTA_RETENTION_S = 30
+COPYPASTA_MAX_RECENT = 2000
 
 CLIP_COMMAND_RE = re.compile(r"(?i)(?:^|\s)(?:!clip|clip\s+(?:it|that|das)|clippen|!highlight)(?:\s|$)")
+URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
+PUNCTUATION_RE = re.compile(r"[^\w\s]")
+WHITESPACE_RE = re.compile(r"\s+")
 
 HYPE_EMOTES = (
     "KEKW",
@@ -55,6 +61,13 @@ def burst_score(metric: float, median: float) -> float:
 def identity(message: ChatMessage) -> str:
     """Stabile Nutzerkennung: Twitch-ID, sonst Anzeigename."""
     return message.user_id or message.user
+
+
+def _normalize_text(text: str) -> str:
+    """Vergleichsform für Copypasta: klein, ohne URLs und Satzzeichen."""
+    lowered = URL_RE.sub(" ", text.lower())
+    without_punctuation = PUNCTUATION_RE.sub("", lowered)
+    return WHITESPACE_RE.sub(" ", without_punctuation).strip()
 
 
 def _has_streamer_badge(badges: str) -> bool:
@@ -120,6 +133,9 @@ class SessionSignals:
         self.copypasta_min_users = int(copypasta_min_users)
         self.copypasta_window_s = int(copypasta_window_s)
         self._streamer_command_until: datetime | None = None
+        self._recent_texts: deque[tuple[datetime, str, str]] = deque(maxlen=COPYPASTA_MAX_RECENT)
+        self._copypasta_until: datetime | None = None
+        self._copypasta_users: set[str] = set()
 
     # -- Chat ---------------------------------------------------------------
     def on_chat(self, message: ChatMessage, now: datetime | None = None) -> None:
@@ -142,6 +158,43 @@ class SessionSignals:
         cutoff = int((now - timedelta(seconds=HISTORY_S)).timestamp())
         for old_key in [k for k in self.buckets if k < cutoff]:
             self.buckets.pop(old_key, None)
+        self._track_copypasta(message, now)
+
+    def _track_copypasta(self, message: ChatMessage, now: datetime) -> None:
+        """Sammelt wiederholte Texte und löst bei genug Nutzern den Hold aus."""
+        normalized = _normalize_text(message.text)
+        if message.emote_only or len(normalized) < 4:
+            return
+        self._recent_texts.append((now, normalized, identity(message)))
+        retention_cutoff = now - timedelta(seconds=COPYPASTA_RETENTION_S)
+        while self._recent_texts and self._recent_texts[0][0] < retention_cutoff:
+            self._recent_texts.popleft()
+        window_start = now - timedelta(seconds=self.copypasta_window_s)
+        users_by_text: dict[str, set[str]] = defaultdict(set)
+        for ts, text, user in self._recent_texts:
+            if ts >= window_start:
+                users_by_text[text].add(user)
+        for users in users_by_text.values():
+            if len(users) >= self.copypasta_min_users:
+                self._copypasta_until = now + timedelta(seconds=COPYPASTA_HOLD_S)
+                self._copypasta_users = set(users)
+                break
+
+    def copypasta_signal(self, now: datetime | None = None) -> SignalDetail:
+        now = now or utcnow()
+        if self._copypasta_until is not None and now >= self._copypasta_until:
+            self._copypasta_until = None
+            self._copypasta_users.clear()
+        active = self._copypasta_until is not None
+        return SignalDetail(
+            score=1.0 if active else 0.0,
+            metric=1.0 if active else 0.0,
+            extra={
+                "active": 1.0 if active else 0.0,
+                "users": len(self._copypasta_users) if active else 0,
+                "window_s": self.copypasta_window_s,
+            },
+        )
 
     # -- Viewer -------------------------------------------------------------
     def add_viewers(self, viewers: int, now: datetime | None = None) -> None:

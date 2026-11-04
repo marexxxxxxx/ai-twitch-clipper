@@ -125,6 +125,57 @@ def test_regular_user_clip_command_is_not_streamer_command():
     signals.on_chat(message, now=NOW)
     assert signals.streamer_command_signal(NOW).score == 0.0
 
+def test_copypasta_requires_three_distinct_users():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10), copypasta_min_users=3)
+    for user_id, user in (("1", "A"), ("2", "B"), ("3", "C")):
+        signals.on_chat(ChatMessage(ts=NOW, user=user, user_id=user_id, text="das ist krass", emotes=[], emote_only=False, hype_count=0), now=NOW)
+    assert signals.copypasta_signal(NOW).score == 1.0
+
+
+def test_copypasta_ignores_same_user_repeats():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10), copypasta_min_users=3)
+    for _ in range(3):
+        signals.on_chat(ChatMessage(ts=NOW, user="A", user_id="1", text="das ist krass", emotes=[], emote_only=False, hype_count=0), now=NOW)
+    assert signals.copypasta_signal(NOW).score == 0.0
+
+
+def test_copypasta_falls_back_to_display_name():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10), copypasta_min_users=3)
+    for user in ("A", "B", "C"):
+        signals.on_chat(ChatMessage(ts=NOW, user=user, user_id="", text="das ist krass", emotes=[], emote_only=False, hype_count=0), now=NOW)
+    assert signals.copypasta_signal(NOW).score == 1.0
+
+
+def test_copypasta_expires_after_hold():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10), copypasta_min_users=3)
+    for user_id, user in (("1", "A"), ("2", "B"), ("3", "C")):
+        signals.on_chat(ChatMessage(ts=NOW, user=user, user_id=user_id, text="das ist krass", emotes=[], emote_only=False, hype_count=0), now=NOW)
+    assert signals.copypasta_signal(NOW + timedelta(seconds=14)).score == 1.0
+    assert signals.copypasta_signal(NOW + timedelta(seconds=16)).score == 0.0
+
+
+def test_copypasta_detail_and_normalization():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10), copypasta_min_users=3)
+    texts = ("Das ist KRASS!!!", "das   ist krass", "das ist krass https://example.com")
+    for user_id, (user, text) in enumerate(zip(("A", "B", "C"), texts)):
+        signals.on_chat(ChatMessage(ts=NOW, user=user, user_id=str(user_id), text=text, emotes=[], emote_only=False, hype_count=0), now=NOW)
+    detail = signals.copypasta_signal(NOW)
+    assert detail.score == 1.0
+    assert detail.extra == {"active": 1.0, "users": 3, "window_s": 10}
+
+    emote_only = SessionSignals(started_at=NOW - timedelta(minutes=10), copypasta_min_users=3)
+    for user_id, user in (("1", "A"), ("2", "B"), ("3", "C")):
+        emote_only.on_chat(ChatMessage(ts=NOW, user=user, user_id=user_id, text="das ist krass", emotes=[], emote_only=True, hype_count=0), now=NOW)
+    assert emote_only.copypasta_signal(NOW).score == 0.0
+
+
+def test_copypasta_respects_window():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10), copypasta_min_users=3)
+    for user_id, user, age in (("1", "A", 11), ("2", "B", 9), ("3", "C", 0)):
+        signals.on_chat(ChatMessage(ts=NOW - timedelta(seconds=age), user=user, user_id=user_id, text="das ist krass", emotes=[], emote_only=False, hype_count=0), now=NOW - timedelta(seconds=age))
+    assert signals.copypasta_signal(NOW).score == 0.0
+
+
 def test_parse_privmsg_emote_only() -> None:
     line = (
         "@badge-info=;display-name=Tester;emotes=25:0-4/1902:6-10;mod=0 "
