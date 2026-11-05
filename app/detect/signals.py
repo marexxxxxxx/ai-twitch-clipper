@@ -149,7 +149,7 @@ class SessionSignals:
         bucket.users.add(identity(message))
         matches = self._hype_pattern.findall(message.text)
         if matches:
-            bucket.hype_keywords += len(matches)
+            bucket.hype_keywords += 1
             bucket.hype_matches.update(match.lower() for match in matches)
         if CLIP_COMMAND_RE.search(message.text):
             bucket.clip_commands += 1

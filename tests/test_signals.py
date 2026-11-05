@@ -113,6 +113,28 @@ def test_hype_keywords_and_clip_commands_are_counted():
     assert signals._bucket_metric(NOW, "hype_keywords") == 1
     assert signals._bucket_metric(NOW, "clip_commands") == 1
 
+
+def test_hype_keywords_counts_message_with_two_keywords_once():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10), hype_keywords="geil,lol")
+    message_ts = NOW - timedelta(seconds=5)
+    signals.on_chat(ChatMessage(ts=message_ts, user="A", user_id="1", text="lol geil", emotes=[], emote_only=False, hype_count=0), now=message_ts)
+    assert signals._bucket_metric(NOW, "hype_keywords") == 1
+
+
+def test_hype_keywords_counts_repeated_keyword_in_message_once():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10), hype_keywords="lol")
+    message_ts = NOW - timedelta(seconds=5)
+    signals.on_chat(ChatMessage(ts=message_ts, user="A", user_id="1", text="lol lol", emotes=[], emote_only=False, hype_count=0), now=message_ts)
+    assert signals._bucket_metric(NOW, "hype_keywords") == 1
+
+
+def test_hype_keywords_counts_separate_messages():
+    signals = SessionSignals(started_at=NOW - timedelta(minutes=10), hype_keywords="geil,lol")
+    message_ts = NOW - timedelta(seconds=5)
+    signals.on_chat(ChatMessage(ts=message_ts, user="A", user_id="1", text="lol geil", emotes=[], emote_only=False, hype_count=0), now=message_ts)
+    signals.on_chat(ChatMessage(ts=message_ts, user="B", user_id="2", text="einfach geil", emotes=[], emote_only=False, hype_count=0), now=message_ts)
+    assert signals._bucket_metric(NOW, "hype_keywords") == 2
+
 def test_streamer_command_hits_and_expires():
     signals = SessionSignals(started_at=NOW - timedelta(minutes=10))
     message = ChatMessage(ts=NOW, user="Alpha", user_id="1", text="!clip", emotes=[], emote_only=False, hype_count=0, badges="broadcaster/1")

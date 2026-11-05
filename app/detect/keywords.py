@@ -11,7 +11,6 @@ DEFAULT_HYPE_KEYWORDS = (
     "wallah, ehre, schwöre"
 )
 
-_ALNUM_TOKEN = re.compile(r"[a-z0-9]+")
 _NEVER_MATCH = re.compile(r"(?!)")
 
 
@@ -25,6 +24,8 @@ def parse_keywords(raw: str | None) -> tuple[str, ...]:
         if keyword and keyword not in seen:
             seen.add(keyword)
             keywords.append(keyword)
+    if not keywords:
+        return parse_keywords(DEFAULT_HYPE_KEYWORDS)
     return tuple(keywords)
 
 
@@ -32,7 +33,7 @@ def keyword_pattern(keywords: tuple[str, ...]) -> re.Pattern[str]:
     """Baut eine case-insensitive Alternation mit Wortgrenzen für Alnum-Tokens."""
     parts: list[str] = []
     for keyword in keywords:
-        if _ALNUM_TOKEN.fullmatch(keyword):
+        if all(ch.isalnum() for ch in keyword):
             parts.append(rf"(?<!\w){re.escape(keyword)}(?!\w)")
         else:
             parts.append(re.escape(keyword))

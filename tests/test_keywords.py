@@ -17,3 +17,13 @@ def test_keyword_pattern_matches_emoji_as_literal():
     pattern = keyword_pattern(parse_keywords("😂, geil"))
     assert has_hype_keyword("das ist so 😂", pattern)
     assert not has_hype_keyword("geilheit", pattern)
+
+
+def test_parse_keywords_falls_back_when_only_separators():
+    assert parse_keywords(" , ") == parse_keywords(DEFAULT_HYPE_KEYWORDS)
+
+
+def test_keyword_pattern_treats_umlaut_keywords_as_word_tokens():
+    pattern = keyword_pattern(("böse",))
+    assert has_hype_keyword("das ist böse", pattern)
+    assert not has_hype_keyword("bösewicht", pattern)

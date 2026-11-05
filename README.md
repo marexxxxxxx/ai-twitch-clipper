@@ -186,8 +186,11 @@ kleineren Batches (`CLIP_BATCH_SIZE = 5`) ebenfalls alle 30 s geholt.
 **Fusion:** `score = Σ wᵢ·sᵢ / Σ wᵢ`. Für Neuinstallationen gilt
 `chat_rate 0.35, emote_burst 0.20, clip_created 0.30, viewers 0.15,
 clip_burst 0.10` und die fünf neuen Signale mit 0.0. Die Summe wird normalisiert.
-Bestehende Installationen behalten ihre gespeicherten Gewichte; bei der
-Migration werden sie nur um die neuen Schlüssel mit 0.0 ergänzt.
+Bestehende Installationen behalten ihre gespeicherten Gewichte;
+`seed_defaults()` ändert eine vorhandene `weights`-Zeile nie. Fehlende
+Gewichtsschlüssel werden erst beim Lesen/Verwenden durch `sanitize_weights()`
+mit ihrem Default ergänzt und nur durch den expliziten Rollout-PUT dauerhaft
+gespeichert.
 
 Das **Chat-Profil** (Button „Chat-Profil anwenden“) setzt:
 `chat_rate 0.20, unique_chatters 0.15, emote_burst 0.15, hype_keywords 0.10,
